@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Du Green Ops</title>
+  <meta name="description" content="Du Green landscaping operations: site areas, specification, procurement and costing.">
+  <meta name="theme-color" content="#2F6A17">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Du Green Ops">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Public+Sans:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><img src="icons/logo.png" alt=""><span>Du Green <b>Ops</b></span></a>
+    <nav class="topnav" aria-label="Main">
+      <a href="#/" data-nav="projects">Projects</a>
+      <a href="#/library" data-nav="library">Suppliers</a>
+      <a href="#/settings" data-nav="settings">Settings</a>
+    </nav>
+    <div class="who" id="who"></div>
+  </header>
+  <div id="banner"></div>
+  <main id="app" tabindex="-1"><p class="loading">Loading…</p></main>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/supabase.js"></script>
+  <script type="module" src="js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  </script>
+</body>
+</html>
