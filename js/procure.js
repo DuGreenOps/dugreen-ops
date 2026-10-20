@@ -136,7 +136,7 @@ function rfqList(el, ctx, D) {
   el.querySelector('#new').onclick = () => editRfq(ctx, D, null);
   el.querySelectorAll('[data-r]').forEach(r => r.onclick = () => ctx.go(`#/p/${project.id}/procure/rfq/${r.dataset.r}`));
 }
-export const PO_STATUS = { draft: 'Draft', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Rejected', issued: 'Issued to supplier', received: 'Delivered' };
+export const PO_STATUS = { draft: 'Draft', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Rejected', issued: 'Issued to supplier', part: 'Part delivered', received: 'Delivered' };
 export const statusPill = s => `<span class="pill ${['sent', 'issued', 'pending'].includes(s) ? 'info' : s === 'closed' ? 'mute' : ['received', 'approved'].includes(s) ? 'ok' : s === 'rejected' ? 'bad' : 'warn'}">${esc({ ...PO_STATUS, sent: 'Sent', closed: 'Closed' }[s] || s)}</span>`;
 
 async function editRfq(ctx, D, rfq) {
@@ -437,7 +437,7 @@ export function poActions(po, me) {
     case 'draft': case 'rejected': return b('submit', 'Submit for approval', 'primary') + (admin ? b('approve', 'Approve now') : '');
     case 'pending': return admin ? b('approve', 'Approve', 'primary') + b('reject', 'Reject', 'danger') : '<span class="small muted">Waiting for Matt to approve</span>';
     case 'approved': return b('issue', 'Mark as sent to supplier', 'primary');
-    case 'issued': return b('receive', 'Mark as delivered', 'primary');
+    case 'issued': case 'part': return b('receive', 'Mark as fully delivered', 'primary');
     default: return '';
   }
 }
@@ -448,5 +448,6 @@ export async function poAct(store, po, act, me) {
     reject: { status: 'rejected' }, issue: { status: 'issued' }, receive: { status: 'received', received_at: now } }[act];
   if (!patch) return;
   await store.update('purchase_orders', po.id, patch);
+  if (act === 'receive') for (const l of await store.list('po_lines', { po_id: po.id }, null)) if (Number(l.qty_received) !== Number(l.qty)) await store.update('po_lines', l.id, { qty_received: Number(l.qty) });
   toast({ submit: 'Sent for approval', approve: 'Approved', reject: 'Rejected', issue: 'Marked as sent', receive: 'Marked as delivered' }[act]);
 }

@@ -5,7 +5,8 @@ import { CONFIG } from './config.js';
 import { uid } from './util.js';
 
 const CHILDREN = {
-  projects: [['areas', 'project_id'], ['spec_items', 'project_id'], ['rfqs', 'project_id'], ['quotes', 'project_id'], ['selections', 'project_id'], ['purchase_orders', 'project_id'], ['costing', 'project_id'], ['claude_log', 'project_id'], ['tasks', 'project_id'], ['jobcards', 'project_id'], ['site_instructions', 'project_id'], ['requests', 'project_id'], ['expenses', 'project_id'], ['claims', 'project_id']],
+  projects: [['areas', 'project_id'], ['spec_items', 'project_id'], ['rfqs', 'project_id'], ['quotes', 'project_id'], ['selections', 'project_id'], ['purchase_orders', 'project_id'], ['costing', 'project_id'], ['claude_log', 'project_id'], ['tasks', 'project_id'], ['jobcards', 'project_id'], ['site_instructions', 'project_id'], ['requests', 'project_id'], ['expenses', 'project_id'], ['claims', 'project_id'], ['sub_certs', 'project_id'], ['handovers', 'project_id']],
+  staff: [['contracts', 'person_id']],
   areas: [['spec_items', 'area_id']],
   rfqs: [['rfq_lines', 'rfq_id']],
   quotes: [['quote_lines', 'quote_id']],
@@ -56,7 +57,7 @@ class CloudStore {
     return Array.isArray(rows) ? data : data[0];
   }
   async update(table, id, patch) {
-    const p = ['projects', 'areas', 'spec_items', 'tasks', 'jobcards'].includes(table) ? { ...patch, updated_at: new Date().toISOString() } : patch;
+    const p = ['projects', 'areas', 'spec_items', 'tasks', 'jobcards', 'contracts', 'sub_certs', 'handovers', 'claims'].includes(table) ? { ...patch, updated_at: new Date().toISOString() } : patch;
     const { data, error } = await this.sb.from(table).update(p).eq('id', id).select().maybeSingle(); if (error) throw error; return data;
   }
   async upsert(table, row, onConflict) { const { data, error } = await this.sb.from(table).upsert(row, { onConflict }).select().maybeSingle(); if (error) throw error; return data; }

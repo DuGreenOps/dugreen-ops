@@ -5,6 +5,8 @@ import { activeOn, taskPill, isOverdue } from './pow.js';
 import { captureSignature } from './sign.js';
 import { openJobcardDoc, openSiDoc } from './docs.js';
 import { poAct } from './procure.js';
+import { contractFor, contractBadge, startContract } from './contracts.js';
+import { editStaff } from './staff.js';
 
 export const WEATHER = ['Sunny', 'Partly cloudy', 'Overcast', 'Light rain', 'Heavy rain', 'Storm', 'Windy', 'Very hot', 'Cold / frost'];
 export const PLANT_QUICK = ['TLB', 'Tipper truck', 'Bakkie (LDV)', 'Brush cutter', 'Lawn mower', 'Water cart', 'Plate compactor', 'Rotavator', 'Chainsaw'];
@@ -21,12 +23,14 @@ export const reqPill = s => pill(s, REQ_STATUS, { pending: 'warn', approved: 'ok
 export async function render(root, ctx) {
   const { store, project } = ctx;
   const [sub = 'jobcards', arg] = (ctx.rest || []);
-  const [areasRaw, staff, tasks, jobcards, sis, reqs, pos, suppliers] = await Promise.all([
+  const [areasRaw, staff, tasks, jobcards, sis, reqs, pos, suppliers, contracts] = await Promise.all([
     store.list('areas', { project_id: project.id }), store.list('staff', {}, 'name'), store.list('tasks', { project_id: project.id }, 'sort'),
     store.list('jobcards', { project_id: project.id }, 'card_date'), store.list('site_instructions', { project_id: project.id }), store.list('requests', { project_id: project.id }),
-    store.list('purchase_orders', { project_id: project.id }), store.list('suppliers', {}, 'name')]);
+    store.list('purchase_orders', { project_id: project.id }), store.list('suppliers', {}, 'name'), store.list('contracts', {}, null)]);
+  const openIds = pos.filter(p => ['approved', 'issued', 'part'].includes(p.status)).map(p => p.id);
+  const poLines = openIds.length ? await store.list('po_lines', { po_id: openIds }, 'sort') : [];
   const areas = sortAreas(areasRaw);
-  const D = { areas, areaBy: Object.fromEntries(areas.map(a => [a.id, a])), staff, staffBy: Object.fromEntries(staff.map(s => [s.id, s])), tasks, jobcards, sis, reqs, pos, sup: Object.fromEntries(suppliers.map(s => [s.id, s])) };
+  const D = { areas, areaBy: Object.fromEntries(areas.map(a => [a.id, a])), staff, staffBy: Object.fromEntries(staff.map(s => [s.id, s])), tasks, jobcards, sis, reqs, pos, poLines, contracts, sup: Object.fromEntries(suppliers.map(s => [s.id, s])) };
   const openSI = sis.filter(s => ['open', 'signed', 'priced'].includes(s.status)).length, pendReq = reqs.filter(r => r.status === 'pending').length;
   root.innerHTML = `<div class="page">
     <div class="row"><div class="grow"><div class="eyebrow">Site Supervisor</div><h2 style="font-size:24px">Site diary</h2></div>
@@ -51,7 +55,7 @@ function jobcardList(el, ctx, D) {
       <button class="btn" id="blank">Print blank jobcard</button>
       <a class="btn primary" href="#/p/${project.id}/site/jobcard/${today()}">${todays.length ? "Open today's jobcard" : "Start today's jobcard"}</a></div>
     ${cards.length ? `<div class="tbl"><table><thead><tr><th>Date</th><th>Supervisor</th><th class="n">Staff</th><th class="n">Tasks</th><th>Issues</th><th>Status</th></tr></thead><tbody>
-      ${cards.map(c => { const st = (c.staff || []).reduce((t, s) => t + (Number(s.count) || 1), 0); const tk = c.tasks || []; return `<tr class="click" data-d="${c.card_date}" data-s="${c.supervisor_id || ''}"><td><b>${fmtDate(c.card_date)}</b></td><td>${esc(D.staffBy[c.supervisor_id]?.name || '–')}</td><td class="n">${st}</td>
+      ${cards.map(c => { const st = (c.staff || []).reduce((t, s) => t + (Number(s.count) || 1), 0) + (c.subbies || []).reduce((t, s) => t + (Number(s.crew) || 1), 0); const tk = c.tasks || []; return `<tr class="click" data-d="${c.card_date}" data-s="${c.supervisor_id || ''}"><td><b>${fmtDate(c.card_date)}</b></td><td>${esc(D.staffBy[c.supervisor_id]?.name || '–')}</td><td class="n">${st}</td>
         <td class="n">${tk.filter(t => t.state === 'done').length}/${tk.length}${(c.extra_tasks || []).length ? ` +${c.extra_tasks.length}` : ''}</td><td class="small">${c.issues ? '⚠ ' + esc(c.issues.slice(0, 60)) : '–'}</td><td>${jcPill(c.status)}</td></tr>`; }).join('')}
     </tbody></table></div>` : `<div class="empty"><b>No jobcards yet</b>Each day the supervisor opens today's jobcard. It's filled in from the programme, and they record staff, weather, work done, deliveries and issues.</div>`}</section>`;
   el.querySelectorAll('[data-d]').forEach(r => r.onclick = () => ctx.go(`#/p/${project.id}/site/jobcard/${r.dataset.d}${r.dataset.s ? '?s=' + r.dataset.s : ''}`));
@@ -74,14 +78,18 @@ async function jobcardView(el, ctx, D, date) {
     project_id: project.id, card_date: date, supervisor_id: supId || null, status: 'draft',
     weather: { am: '', pm: '', rain_mm: null, temp: null, lost_hours: null },
     staff: [], tasks: planned.map(t => ({ task_id: t.id, name: t.name, area: D.areaBy[t.area_id]?.code || '', state: '', pct: Number(t.pct) || 0, notes: '' })),
-    extra_tasks: [{ text: '', area: '', notes: '' }, { text: '', area: '', notes: '' }], plant: [], deliveries: [], issues: '', safety: '', visitors: '', notes: '', photos: [],
+    extra_tasks: [{ text: '', area: '', notes: '' }, { text: '', area: '', notes: '' }], plant: [], deliveries: [], subbies: [], issues: '', safety: '', visitors: '', notes: '', photos: [],
   };
   // Add newly planned tasks that weren't on a saved draft.
   if (card && jc.status === 'draft') for (const t of planned) if (!jc.tasks.some(x => x.task_id === t.id)) jc.tasks.push({ task_id: t.id, name: t.name, area: D.areaBy[t.area_id]?.code || '', state: '', pct: Number(t.pct) || 0, notes: '' });
   const locked = jc.status !== 'draft';
-  const openPOs = D.pos.filter(p => ['approved', 'issued'].includes(p.status));
+  const openPOs = D.pos.filter(p => ['approved', 'issued', 'part'].includes(p.status) || (jc.deliveries || []).some(d => d.po_id === p.id));
+  jc.subbies = jc.subbies || [];
   const canApprove = ['admin', 'qs'].includes(ctx.me?.role);
-  const active = D.staff.filter(s => s.active !== false);
+  const active = D.staff.filter(s => s.active !== false && s.kind !== 'subcontractor');
+  const subs = D.staff.filter(s => s.active !== false && s.kind === 'subcontractor');
+  const cOf = id => contractFor(id, D.contracts, project.id, date);
+  const signBtn = (id, r) => r.ok || locked ? '' : `<button class="btn small" style="display:block;margin-top:4px" type="button" data-sign="${id}">${r.state === 'draft' ? 'Finish contract' : 'Sign contract'}</button>`;
   const sel = (name, opts, v, dis) => `<select name="${name}" ${dis ? 'disabled' : ''}><option value="">—</option>${opts.map(o => `<option ${v === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
   const dis = locked ? 'disabled' : '';
   const photoUrls = {};
@@ -99,13 +107,20 @@ async function jobcardView(el, ctx, D, date) {
       <label class="f">Temperature (°C)<input name="w_temp" inputmode="decimal" value="${jc.weather?.temp ?? ''}" ${dis}></label>
       <label class="f span2">Hours lost to weather<input name="w_lost" inputmode="decimal" value="${jc.weather?.lost_hours ?? ''}" ${dis}></label></div></section>
 
-    <section class="card"><div class="hd"><h3>👷 Staff on site</h3><span class="small muted">${(jc.staff || []).reduce((t, s) => t + (Number(s.count) || 1), 0)} people</span><span class="grow"></span>${locked ? '' : '<button class="btn small" id="addp">+ Person not in register</button><button class="btn small" id="addc">+ Casual workers</button>'}</div>
-      <div class="tbl"><table><thead><tr><th></th><th>Name</th><th>Role</th><th class="n">Hours</th></tr></thead><tbody>
-      ${active.map(s => { const on = (jc.staff || []).find(x => x.staff_id === s.id); return `<tr><td><input type="checkbox" data-st="${s.id}" ${on ? 'checked' : ''} ${dis} aria-label="${esc(s.name)} on site"></td><td>${esc(s.name)}</td><td class="small">${esc(s.role || '')}</td>
+    <section class="card"><div class="hd"><h3>👷 Staff on site</h3><span class="small muted">${(jc.staff || []).reduce((t, s) => t + (Number(s.count) || 1), 0)} people</span><span class="grow"></span>${locked ? '' : '<button class="btn small" id="addp">+ Add person to register</button>'}</div>
+      <div class="tbl"><table><thead><tr><th></th><th>Name</th><th>Role</th><th>Contract</th><th class="n">Hours</th></tr></thead><tbody>
+      ${active.map(s => { const on = (jc.staff || []).find(x => x.staff_id === s.id); const r = cOf(s.id); return `<tr><td><input type="checkbox" data-st="${s.id}" ${on ? 'checked' : ''} ${dis} aria-label="${esc(s.name)} on site"></td><td>${esc(s.name)}</td><td class="small">${esc(s.role || '')}</td><td style="white-space:normal">${contractBadge(r, true)}${signBtn(s.id, r)}</td>
         <td class="n"><input class="num" style="width:70px" data-sh="${s.id}" inputmode="decimal" value="${on?.hours ?? 8}" ${dis}></td></tr>`; }).join('')}
-      ${(jc.staff || []).filter(x => !x.staff_id).map((x, i) => `<tr><td>✓</td><td><input data-ox="${i}" data-k="name" value="${esc(x.name)}" ${dis} placeholder="Name"></td><td><input data-ox="${i}" data-k="role" value="${esc(x.role || '')}" ${dis} placeholder="Role"></td>
+      ${(jc.staff || []).filter(x => !x.staff_id).map((x, i) => `<tr><td>✓</td><td><input data-ox="${i}" data-k="name" value="${esc(x.name)}" ${dis} placeholder="Name"></td><td><input data-ox="${i}" data-k="role" value="${esc(x.role || '')}" ${dis} placeholder="Role"></td><td><span class="pill bad">Not in register</span></td>
         <td class="n">${x.count > 1 || x.casual ? `<input class="num" style="width:56px" data-ox="${i}" data-k="count" value="${x.count || 1}" ${dis} aria-label="Number"> × ` : ''}<input class="num" style="width:70px" data-ox="${i}" data-k="hours" value="${x.hours ?? 8}" ${dis} aria-label="Hours"></td></tr>`).join('')}
-      </tbody></table></div>${active.length ? '' : '<div class="small muted" style="padding:10px 14px">Add your team in the <a href="#/staff">Staff register</a> so they can be ticked here.</div>'}</section>
+      </tbody></table></div>${active.length ? '' : '<div class="small muted" style="padding:10px 14px">Add your team with “+ Add person to register” so they can be ticked here and sign contracts.</div>'}</section>
+
+    <section class="card"><div class="hd"><h3>🤝 Subcontractors on site</h3><span class="small muted">${jc.subbies.reduce((t, s) => t + (Number(s.crew) || 1), 0)} people</span><span class="grow"></span>${locked ? '' : '<button class="btn small" id="adds">+ Add subcontractor</button>'}</div>
+      ${subs.length ? `<div class="tbl"><table><thead><tr><th></th><th>Subcontractor</th><th>Contract</th><th class="n">Crew</th><th class="n">Hours</th><th>Work done today</th></tr></thead><tbody>
+      ${subs.map(s => { const on = jc.subbies.find(x => x.person_id === s.id); const r = cOf(s.id); return `<tr><td><input type="checkbox" data-sb="${s.id}" ${on ? 'checked' : ''} ${dis} aria-label="${esc(s.name)} on site"></td><td><b>${esc(s.name)}</b><div class="small muted">${esc(s.role || '')}</div></td><td style="white-space:normal">${contractBadge(r, true)}${signBtn(s.id, r)}</td>
+        <td class="n"><input class="num" style="width:56px" data-sbc="${s.id}" inputmode="numeric" value="${on?.crew ?? s.crew_size ?? 1}" ${dis}></td><td class="n"><input class="num" style="width:60px" data-sbh="${s.id}" inputmode="decimal" value="${on?.hours ?? 8}" ${dis}></td>
+        <td><input data-sbw="${s.id}" value="${esc(on?.work || '')}" placeholder="e.g. Laid 40 m² paving in H1" ${dis}></td></tr>`; }).join('')}
+      </tbody></table></div>` : '<div class="empty small">No subcontractors in the register yet.</div>'}</section>
 
     <section class="card"><div class="hd"><h3>✔ Planned work</h3><span class="small muted">From the programme</span></div>
       ${jc.tasks.length ? `<div class="tbl"><table><thead><tr><th>Task</th><th>Done?</th><th class="n">% complete</th><th>Notes</th></tr></thead><tbody>
@@ -122,7 +137,10 @@ async function jobcardView(el, ctx, D, date) {
 
     <section class="card"><div class="hd"><h3>📦 Deliveries received</h3></div><div class="bd stack" style="gap:8px">
       ${openPOs.length ? openPOs.map(p => { const d = (jc.deliveries || []).find(x => x.po_id === p.id) || {}; return `<div class="row"><select data-dv="${p.id}" style="width:auto" ${dis}><option value="">Not today</option><option value="full" ${d.state === 'full' ? 'selected' : ''}>Delivered in full</option><option value="part" ${d.state === 'part' ? 'selected' : ''}>Part delivery</option></select>
-        <span class="grow"><b>${esc(p.number)}</b> · ${esc(D.sup[p.supplier_id]?.name || '')}</span><input data-dvn="${p.id}" placeholder="Delivery note no. / what's missing" value="${esc(d.note || '')}" style="max-width:280px" ${dis}></div>`; }).join('') : '<span class="small muted">No purchase orders are awaiting delivery.</span>'}
+        <span class="grow"><b>${esc(p.number)}</b> · ${esc(D.sup[p.supplier_id]?.name || '')}${p.status === 'part' ? ' <span class="pill warn">Part delivered before</span>' : ''}</span><input data-dvn="${p.id}" placeholder="Delivery note no. / what's missing" value="${esc(d.note || '')}" style="max-width:280px" ${dis}></div>
+        <div data-dvl="${p.id}" class="tbl" ${d.state === 'part' ? '' : 'hidden'}><table><thead><tr><th>Item</th><th class="n">Ordered</th><th class="n">Received before</th><th class="n">Received today</th></tr></thead><tbody>
+          ${D.poLines.filter(l => l.po_id === p.id).map(l => `<tr><td>${esc(l.description)}<div class="small muted">${esc(l.spec || '')}</div></td><td class="n">${fmt(l.qty, 2)} ${esc(l.unit || '')}</td><td class="n">${fmt(Number(l.qty_received) || 0, 2)}</td>
+            <td class="n"><input class="num" style="width:80px" data-dq="${l.id}" inputmode="decimal" value="${(d.lines || []).find(x => x.po_line_id === l.id)?.qty ?? ''}" ${dis}></td></tr>`).join('')}</tbody></table></div>`; }).join('') : '<span class="small muted">No purchase orders are awaiting delivery.</span>'}
       <label class="f">Other deliveries<input name="other_deliv" value="${esc((jc.deliveries || []).find(x => !x.po_id)?.note || '')}" ${dis}></label></div></section>
 
     <section class="card"><div class="hd"><h3>⚠ Issues, safety and visitors</h3></div><div class="bd stack">
@@ -149,11 +167,12 @@ async function jobcardView(el, ctx, D, date) {
     jc.weather = { am: q('[name=w_am]').value, pm: q('[name=w_pm]').value, rain_mm: num(q('[name=w_rain]').value), temp: num(q('[name=w_temp]').value), lost_hours: num(q('[name=w_lost]').value) };
     const others = (jc.staff || []).filter(x => !x.staff_id);
     el.querySelectorAll('[data-ox]').forEach(i => { const o = others[+i.dataset.ox]; o[i.dataset.k] = ['count', 'hours'].includes(i.dataset.k) ? num(i.value) : i.value; });
-    jc.staff = [...active.filter(s => q(`[data-st="${s.id}"]`)?.checked).map(s => ({ staff_id: s.id, name: s.name, role: s.role, hours: num(q(`[data-sh="${s.id}"]`).value) ?? 8, count: 1, day_rate: s.day_rate ?? null })), ...others];
+    jc.staff = [...active.filter(s => q(`[data-st="${s.id}"]`)?.checked).map(s => ({ staff_id: s.id, name: s.name, role: s.role, kind: s.kind || 'staff', hours: num(q(`[data-sh="${s.id}"]`).value) ?? 8, count: 1, day_rate: s.day_rate ?? null, contract_id: cOf(s.id).ok ? cOf(s.id).c.id : null })), ...others];
+    jc.subbies = subs.filter(s => q(`[data-sb="${s.id}"]`)?.checked).map(s => ({ person_id: s.id, name: s.name, trade: s.role, crew: num(q(`[data-sbc="${s.id}"]`).value) || 1, hours: num(q(`[data-sbh="${s.id}"]`).value) ?? 8, work: q(`[data-sbw="${s.id}"]`).value, contract_id: cOf(s.id).ok ? cOf(s.id).c.id : null }));
     el.querySelectorAll('[data-tk]').forEach(i => { const t = jc.tasks[+i.dataset.tk]; t[i.dataset.k] = i.dataset.k === 'pct' ? num(i.value) : i.value; if (i.dataset.k === 'state' && i.value === 'done') t.pct = 100; });
     el.querySelectorAll('[data-xt]').forEach(i => { const x = jc.extra_tasks[+i.dataset.xt]; if (x) x[i.dataset.k] = i.value; });
     el.querySelectorAll('[data-pl]').forEach(i => { jc.plant[+i.dataset.pl][i.dataset.k] = i.dataset.k === 'hours' ? num(i.value) : i.value; });
-    const dv = []; el.querySelectorAll('[data-dv]').forEach(s => { if (s.value) { const p = D.pos.find(x => x.id === s.dataset.dv); dv.push({ po_id: p.id, po_number: p.number, state: s.value, note: q(`[data-dvn="${p.id}"]`).value }); } });
+    const dv = []; el.querySelectorAll('[data-dv]').forEach(s => { if (s.value) { const p = D.pos.find(x => x.id === s.dataset.dv); const lines = s.value === 'part' ? [...el.querySelectorAll(`[data-dvl="${p.id}"] [data-dq]`)].map(i => ({ po_line_id: i.dataset.dq, qty: num(i.value) })).filter(x => x.qty) : []; dv.push({ po_id: p.id, po_number: p.number, state: s.value, note: q(`[data-dvn="${p.id}"]`).value, lines }); } });
     const od = q('[name=other_deliv]').value; if (od) dv.push({ po_id: null, note: od });
     jc.deliveries = dv;
     for (const k of ['issues', 'safety', 'visitors', 'notes']) jc[k] = q(`[name=${k}]`).value;
@@ -175,8 +194,10 @@ async function jobcardView(el, ctx, D, date) {
     q('#print').onclick = () => { read(); openJobcardDoc(project, jc, D); };
     if (!locked) {
       q('#sup').onchange = () => { read(); };
-      q('#addp').onclick = () => { read(); jc.staff.push({ staff_id: null, name: '', role: '', hours: 8, count: 1 }); draw(); };
-      q('#addc').onclick = () => { read(); jc.staff.push({ staff_id: null, name: 'Casual workers', role: 'Casual', hours: 8, count: 2, casual: true }); draw(); };
+      const addPerson = async kind => { read(); const p = await editStaff(store, null, { me: ctx.me, kind }); if (!p || p === 'deleted') return; D.staff.push(p); D.staffBy[p.id] = p; if (kind === 'subcontractor') { subs.push(p); jc.subbies.push({ person_id: p.id, name: p.name, crew: p.crew_size || 1, hours: 8, work: '' }); } else { active.push(p); jc.staff.push({ staff_id: p.id, name: p.name, role: p.role, kind: p.kind, hours: 8, count: 1 }); } draw(); };
+      q('#addp').onclick = () => addPerson('casual');
+      q('#adds') && (q('#adds').onclick = () => addPerson('subcontractor'));
+      el.querySelectorAll('[data-dv]').forEach(s => s.onchange = () => { const box = el.querySelector(`[data-dvl="${s.dataset.dv}"]`); if (box) box.hidden = s.value !== 'part'; });
       q('#addx').onclick = () => { read(); jc.extra_tasks.push({ text: '', area: '', notes: '' }); draw(); };
       q('#pq').onchange = e => { read(); const v = e.target.value; if (!v) return; jc.plant.push({ item: v === '__other' ? '' : v, hours: null, notes: '' }); draw(); };
       q('#ph') && (q('#ph').onchange = async e => {
@@ -190,7 +211,9 @@ async function jobcardView(el, ctx, D, date) {
       q('#save').onclick = async () => { await save(); toast('Jobcard saved'); };
       q('#submit').onclick = async () => {
         read();
-        if (!jc.staff.length && !(await confirmDlg('No staff ticked', 'Submit without anyone on site?', 'Submit anyway'))) return;
+        if (!jc.staff.length && !jc.subbies.length && !(await confirmDlg('No staff ticked', 'Submit without anyone on site?', 'Submit anyway'))) return;
+        const noC = [...jc.staff.filter(s => s.staff_id && !cOf(s.staff_id).ok), ...jc.subbies.filter(s => !cOf(s.person_id).ok)].map(s => s.name);
+        if (noC.length && !(await confirmDlg('Some people have no contract', `${noC.join(', ')} ${noC.length === 1 ? 'has' : 'have'} no signed contract. Use “Sign contract” first, or submit anyway and Matt will see it flagged.`, 'Submit anyway'))) return;
         const sig = await captureSignature('Supervisor signature', D.staffBy[jc.supervisor_id]?.name || ctx.me?.full_name || '');
         if (!sig) return toast('A signature is needed to submit.');
         await save({ status: 'submitted', supervisor_sign: sig });
@@ -202,16 +225,35 @@ async function jobcardView(el, ctx, D, date) {
           if (pct !== Number(task.pct) || status !== task.status) await store.update('tasks', task.id, { pct, status });
         }
         // deliveries → purchase orders
-        for (const d of jc.deliveries.filter(d => d.po_id && d.state === 'full')) { const p = D.pos.find(x => x.id === d.po_id); if (p && p.status !== 'received') await poAct(store, p, 'receive', ctx.me); }
+        await applyDeliveries(store, D, jc.deliveries, ctx.me);
         toast('Jobcard submitted'); ctx.reload();
       };
     } else {
       q('#approve') && (q('#approve').onclick = async () => { await store.update('jobcards', card.id, { status: 'approved', reviewed_at: new Date().toISOString(), reviewed_by: ctx.me?.id && ctx.me.id !== 'demo-user' ? ctx.me.id : null }); toast('Jobcard approved'); ctx.reload(); });
       q('#reopen') && (q('#reopen').onclick = async () => { await store.update('jobcards', card.id, { status: 'draft' }); toast('Sent back to the supervisor'); ctx.reload(); });
     }
+    el.querySelectorAll('[data-sign]').forEach(b => b.onclick = async () => {
+      read(); const person = D.staffBy[b.dataset.sign]; const r = cOf(person.id);
+      const c = await startContract(ctx, { person, project, areas: D.areas, contract: r.state === 'draft' ? r.c : null });
+      if (c && c !== 'deleted') { D.contracts = [...D.contracts.filter(x => x.id !== c.id), c]; }
+      if (c === 'deleted') D.contracts = D.contracts.filter(x => x.id !== r.c?.id);
+      draw();
+    });
     q('#req').onclick = async () => { read(); if (await newRequest(ctx, D, { requested_by: D.staffBy[jc.supervisor_id]?.name })) toast('Request sent to Matt'); };
   };
   draw();
+}
+
+// Deliveries on a submitted jobcard update the purchase orders: full → every line received; part → the quantities entered.
+export async function applyDeliveries(store, D, deliveries, me) {
+  for (const d of (deliveries || []).filter(d => d.po_id && d.state)) {
+    const p = D.pos.find(x => x.id === d.po_id); if (!p || p.status === 'received') continue;
+    const lines = D.poLines.filter(l => l.po_id === p.id);
+    if (d.state === 'full') { for (const l of lines) if (Number(l.qty_received) !== Number(l.qty)) await store.update('po_lines', l.id, { qty_received: Number(l.qty) }); await poAct(store, p, 'receive', me); continue; }
+    for (const x of d.lines || []) { const l = lines.find(y => y.id === x.po_line_id); if (l) { l.qty_received = (Number(l.qty_received) || 0) + Number(x.qty); await store.update('po_lines', l.id, { qty_received: l.qty_received }); } }
+    const all = lines.length && lines.every(l => (Number(l.qty_received) || 0) >= Number(l.qty) - 1e-9);
+    if (all) await poAct(store, p, 'receive', me); else await store.update('purchase_orders', p.id, { status: 'part' });
+  }
 }
 
 async function shrink(file, max = 1600) {

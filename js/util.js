@@ -22,7 +22,7 @@ export function itemKey(description, spec, unit) {
 }
 
 export const UNITS = ['each', 'm²', 'm', 'm³', 'bag', 'load', 'kg', 'L', 'tray', 'roll', 'item', 'hour', 'day', 'week', 'month', 'trip'];
-export const CATEGORIES = ['Plants', 'Trees', 'Lawn & grassing', 'Hardscaping', 'Irrigation & piping', 'Soil & fertiliser', 'Earthworks', 'Drainage', 'Structures & furniture', 'Labour', 'Transport', 'Plant hire & transport', 'Preliminaries', 'Maintenance', 'Other'];
+export const CATEGORIES = ['Plants', 'Trees', 'Lawn & grassing', 'Hardscaping', 'Irrigation & piping', 'Soil & fertiliser', 'Earthworks', 'Drainage', 'Structures & furniture', 'Subcontractors', 'Labour', 'Transport', 'Plant hire & transport', 'Preliminaries', 'Maintenance', 'Other'];
 // Transport planning presets (cost is entered by the QS; defaults can be changed in Settings).
 export const VEHICLES = [
   { key: '8t truck', basis: 'load', capacity_m3: 6, cost: null },
@@ -55,7 +55,7 @@ export function toast(msg, ms = 2800) {
 }
 
 // Modal dialog. `body` is HTML; `onOpen(el)` wires inputs; buttons resolve the promise.
-export function dialog({ title, body = '', buttons = [{ label: 'Close', value: null }], wide = false, onOpen }) {
+export function dialog({ title, body = '', buttons = [{ label: 'Close', value: null }], wide = false, onOpen, sticky = false }) {
   return new Promise(resolve => {
     const wrap = document.createElement('div');
     wrap.className = 'dlg-back';
@@ -67,6 +67,7 @@ export function dialog({ title, body = '', buttons = [{ label: 'Close', value: n
     const onKey = e => { if (e.key === 'Escape') close(null); };
     document.addEventListener('keydown', onKey);
     wrap.addEventListener('click', async e => {
+      if (e.target === wrap && sticky) return; // long forms: a stray tap outside must not lose the data
       if (e.target === wrap || e.target.closest('[data-x]')) return close(null);
       const b = e.target.closest('[data-i]'); if (!b) return;
       const def = buttons[+b.dataset.i];
@@ -109,3 +110,9 @@ export const csvCell = v => { const s = String(v ?? ''); return /[",\n]/.test(s)
 export const groupBy = (arr, f) => arr.reduce((m, x) => { const k = f(x); (m[k] = m[k] || []).push(x); return m; }, {});
 export const sum = (arr, f = x => x) => arr.reduce((a, x) => a + (Number(f(x)) || 0), 0);
 export const byNatural = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+
+// People on site: staff, casual workers and subcontractors (v3).
+export const PERSON_KINDS = { staff: 'Staff', casual: 'Casual', subcontractor: 'Subcontractor' };
+export const PAY_BASIS = { day: 'Daily rate', hour: 'Hourly rate', month: 'Monthly fee / salary', job: 'Job / lump-sum fee', rate: 'Measured rates' };
+export const WORKDAYS_PER_MONTH = 26; // Mon–Sat; used to cost monthly staff per day on site
+export const canSetRates = me => ['admin', 'qs', 'procurement'].includes(me?.role);

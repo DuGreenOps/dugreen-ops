@@ -12,13 +12,13 @@ td{padding:6px 8px;border-bottom:1px solid #ddd;vertical-align:top}td.n,th.n{tex
 .bar{position:sticky;top:0;background:#fff;padding:8px 0 12px;display:flex;gap:8px}.bar button{font:600 14px Arial;padding:8px 14px;border-radius:6px;border:1px solid #2F6A17;background:#2F6A17;color:#fff;cursor:pointer}
 @media print{.bar{display:none}body{padding:0}}`;
 
-function head(title, right) {
+export function head(title, right) {
   const c = CONFIG.COMPANY;
   return `<div class="bar"><button onclick="print()">Print / Save as PDF</button></div>
   <div class="hd"><div><img src="${new URL('icons/logo.png', location.href)}" alt="Du Green Organic"><h1>${esc(title)}</h1>${right || ''}</div>
   <div class="co"><b>${esc(c.name)}</b><br>Trading as ${esc(c.trading)}<br>${esc(c.address)}<br>VAT No. ${esc(c.vat_no)}<br>${esc(c.email)}</div></div>`;
 }
-function open(html, title) {
+export function open(html, title) {
   const w = window.open('', '_blank');
   if (!w) { alert('Allow pop-ups to open the document.'); return; }
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head><body>${html}</body></html>`);
@@ -79,8 +79,8 @@ export function openBoqDoc(project, sections, totals) {
 }
 
 // ---------------------------------------------------------------- v2 documents
-const blankRows = (n, cols) => Array.from({ length: n }, () => `<tr>${'<td style="height:26px"></td>'.repeat(cols)}</tr>`).join('');
-const box = (label, text, h = 60) => `<div class="box" style="min-height:${h}px"><b>${esc(label)}</b><div style="white-space:pre-wrap;margin-top:4px">${esc(text || '')}</div></div>`;
+export const blankRows = (n, cols) => Array.from({ length: n }, () => `<tr>${'<td style="height:26px"></td>'.repeat(cols)}</tr>`).join('');
+export const box = (label, text, h = 60) => `<div class="box" style="min-height:${h}px"><b>${esc(label)}</b><div style="white-space:pre-wrap;margin-top:4px">${esc(text || '')}</div></div>`;
 
 export function openPlanDoc(project, title, tasks, D, sup) {
   const byDay = {};

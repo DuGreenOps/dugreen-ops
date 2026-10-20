@@ -13,7 +13,10 @@ import * as Site from './site.js';
 import * as Costs from './costs.js';
 import * as Staff from './staff.js';
 import * as Dashboard from './dashboard.js';
-import { renderVehicleSettings } from './staff.js';
+import * as Certs from './certs.js';
+import * as Reports from './reports.js';
+import { journey } from './journey.js';
+import { renderVehicleSettings, renderSubTermsSettings } from './staff.js';
 import { getSetting, setSetting } from './store.js';
 import { openClaude } from './claude.js';
 
@@ -62,7 +65,7 @@ async function route() {
   try {
     if (parts[0] === 'p' && parts[1]) return await renderProject(parts[1], parts[2] || (me?.role === 'supervisor' ? 'site' : 'areas'), parts.slice(3));
     if (parts[0] === 'projects') { setNav('projects'); return await renderHome(); }
-    if (parts[0] === 'staff') { setNav('staff'); return await Staff.render(app, ctx); }
+    if (parts[0] === 'staff' || parts[0] === 'people') { setNav('staff'); return await Staff.render(app, ctx, parts.slice(1)); }
     if (parts[0] === 'library') { setNav('library'); return await Library.render(app, ctx, parts.slice(1)); }
     if (parts[0] === 'settings') { setNav('settings'); return await renderSettings(); }
     setNav('home'); return await Dashboard.render(app, ctx);
@@ -167,9 +170,10 @@ async function editProject(p) {
 }
 
 // --------------------------------------------------------------- project
-const TABS = [['areas', 'Areas'], ['map', 'Map'], ['spec', 'Specification'], ['pow', 'Programme'], ['procure', 'Procurement'], ['costing', 'Costing & BOQ'], ['site', 'Site diary'], ['costs', 'Costs & reports']];
+const TABS = [['areas', 'Areas'], ['map', 'Map'], ['spec', 'Specification'], ['pow', 'Programme'], ['procure', 'Procurement'], ['costing', 'Costing & BOQ'], ['site', 'Site diary'], ['certs', 'Certificates'], ['reports', 'Reports & costs']];
 async function renderProject(id, tab, rest) {
   setNav('projects');
+  if (tab === 'costs') { tab = 'reports'; rest = ['costs']; }
   const project = await store.get('projects', id);
   if (!project) { app.innerHTML = `<div class="page"><div class="card empty"><b>Project not found</b><a href="#/">Back to projects</a></div></div>`; return; }
   const pctx = Object.assign(Object.create(ctx), { project, tab, rest, editProject: () => editProject(project) });
@@ -179,11 +183,13 @@ async function renderProject(id, tab, rest) {
           <h1>${esc(project.name)}</h1>
           <div class="meta">${project.client ? `<span>${esc(project.client)}</span>` : ''}${project.code ? `<span>${esc(project.code)}</span>` : ''}${project.site_address ? `<span>${esc(project.site_address)}</span>` : ''}</div></div>
         <button class="btn small" id="pedit">Details</button></div>
+      <div id="journey"></div>
       <nav class="tabs" aria-label="Project sections">${TABS.map(([k, l]) => `<a href="#/p/${id}/${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>
     </div></div><div id="pbody"></div>`;
   app.querySelector('#pedit').onclick = () => editProject(project);
   const body = app.querySelector('#pbody');
-  const view = { areas: Areas, map: MapView, spec: Spec, procure: Procure, costing: Costing, pow: Pow, site: Site, costs: Costs }[tab] || Areas;
+  const view = { areas: Areas, map: MapView, spec: Spec, procure: Procure, costing: Costing, pow: Pow, site: Site, certs: Certs, reports: Reports }[tab] || Areas;
+  if (tab !== 'map') journey(app.querySelector('#journey'), pctx).catch(e => console.warn('journey', e));
   const c = await view.render(body, pctx);
   if (typeof c === 'function') cleanup = c;
   if (tab !== 'map') {
@@ -212,7 +218,8 @@ async function renderSettings() {
       ${team.map(t => `<tr><td>${esc(t.full_name)}</td><td>${esc(t.email)}</td><td>${esc(ROLES[t.role] || t.role)}</td>${isAdmin ? `<td class="n"><button class="btn small" data-edit="${esc(t.email)}">Edit</button></td>` : ''}</tr>`).join('')}
       </tbody></table></div></section>` : ''}
     <section class="card"><div class="hd"><h2>Transport rates</h2><span class="small muted">Defaults offered when the QS adds a transport line</span></div><div id="vset"></div>
-      <div class="bd row"><label class="f" style="max-width:240px">Casual worker day rate (E)<input id="crate" inputmode="decimal" ${isAdmin || store.mode === 'demo' ? '' : 'disabled'}></label><span class="small muted">Used for labour cost when casuals are booked on a jobcard.</span></div></section>
+      <div class="bd row"><label class="f" style="max-width:240px">Casual worker day rate (E)<input id="crate" inputmode="decimal" ${isAdmin || store.mode === 'demo' ? '' : 'disabled'}></label><span class="small muted">Used for unnamed casual workers on older jobcards. Named people are costed from the rates sheet.</span></div></section>
+    <section class="card"><div class="hd"><h2>Standard subcontract terms</h2></div><div id="sterms"></div></section>
     <section class="card"><div class="hd"><h2>Server</h2><span class="pill ${store.mode === 'cloud' ? 'ok' : 'warn'}">${store.mode === 'cloud' ? 'Connected' : 'Demo mode'}</span></div><div class="bd stack">
       <p class="small muted">The shared server (Supabase) stores the team's data and files and runs Claude for the app. Your administrator sets this up once.</p>
       <div class="grid2"><label class="f">Server URL<input id="surl" value="${esc(cfg?.url || '')}" placeholder="https://xxxx.supabase.co"></label>
@@ -226,6 +233,7 @@ async function renderSettings() {
   </div>`;
   const $ = s => app.querySelector(s);
   renderVehicleSettings(app.querySelector('#vset'), store, isAdmin || store.mode === 'demo');
+  renderSubTermsSettings(app.querySelector('#sterms'), store, ['admin', 'qs'].includes(me?.role) || store.mode === 'demo');
   getSetting(store, 'casual_day_rate', null).then(v => { $('#crate').value = v ?? ''; });
   $('#crate').onchange = async e => { await setSetting(store, 'casual_day_rate', num(e.target.value)); toast('Casual day rate saved'); };
   $('#so') && ($('#so').onclick = async () => { await store.signOut(); location.hash = '#/'; location.reload(); });

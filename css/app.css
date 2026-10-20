@@ -229,3 +229,32 @@ td input.num { width: 96px; text-align: right; }
 
 /* phones: card titles take their own line, buttons wrap below */
 @media (max-width: 560px) { .card > .hd > .grow:not(:empty) { flex-basis: 100%; } .bd .row > .grow.small { flex-basis: 100%; } }
+
+/* project journey strip */
+.journey { display: flex; gap: 4px; overflow-x: auto; margin: 8px 0 4px; padding-bottom: 2px; scrollbar-width: thin; }
+.journey .js { display: flex; align-items: center; gap: 6px; padding: 5px 9px 5px 5px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink); text-decoration: none; white-space: nowrap; font-size: 12px; flex: 0 0 auto; }
+.journey .jn { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font: 700 11px var(--display); background: var(--surface-2); color: var(--muted); }
+.journey .jl { display: flex; flex-direction: column; line-height: 1.1; font-weight: 600; }
+.journey .jl small { font-weight: 400; color: var(--muted); font-size: 10.5px; }
+.journey .js.ok .jn { background: var(--ok); color: #fff; }
+.journey .js.warn .jn { background: var(--warn); color: #fff; }
+.journey .js.next { border-color: var(--brand, var(--ok)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 25%, transparent); }
+.phead.compact .journey { display: none; }
+
+/* contract preview inside the app */
+.cdoc { border: 1px solid var(--line); border-radius: 10px; background: #fff; color: #111; padding: 14px 16px; max-height: 52vh; overflow: auto; font-size: 13px; }
+.cdoc .ct { font-size: 17px; text-align: center; margin: 4px 0 2px; }
+.cdoc .cst, .cdoc .cno { text-align: center; font-size: 12px; color: #444; }
+.cdoc h3.sec { background: #E8EFE2; font-size: 12px; letter-spacing: .04em; padding: 5px 8px; margin: 14px 0 6px; }
+.cdoc h4 { font-size: 13px; margin: 10px 0 3px; }
+.cdoc p { margin: 4px 0; }
+.cdoc .sm { font-size: 11.5px; color: #444; }
+.cdoc .note-b { border: 1px solid #ccc; padding: 6px 8px; font-size: 12px; }
+.cdoc table { width: 100%; border-collapse: collapse; }
+.cdoc table.kv td { font-size: 12px; padding: 4px 6px; border: 1px solid #ddd; }
+.cdoc table.kv td.k { background: #f6f6f6; width: 22%; font-weight: 600; }
+.cdoc .terms { font-size: 12px; line-height: 1.45; }
+.cdoc table.sigs td { width: 50%; padding: 8px 10px 14px 0; vertical-align: top; }
+.cdoc .ln { border-top: 1px solid #333; padding-top: 3px; }
+@media (max-width: 560px) { .cdoc table.kv td { display: block; width: auto !important; border-bottom: 0; } .cdoc table.kv td.k { border-top: 1px solid #ddd; } }
+table.sheet td { vertical-align: middle; }

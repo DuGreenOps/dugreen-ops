@@ -5,14 +5,17 @@ import { loadProcurement } from './procure.js';
 import { getSetting } from './store.js';
 import { progress } from './pow.js';
 import { openReportDoc } from './docs.js';
+import { dayCost } from './staff.js';
 
-const COMMITTED = ['approved', 'issued', 'received'];
+const COMMITTED = ['approved', 'issued', 'part', 'received'];
 
 export async function projectFinancials(store, project) {
-  const [D, costRows, jobcards, expenses, claims, sis, tasks, casualRate] = await Promise.all([
+  const [D, costRows, jobcards, expenses, claims, sis, tasks, casualRate, staff, contracts, subCerts] = await Promise.all([
     loadProcurement(store, project), store.list('costing', { project_id: project.id }, null), store.list('jobcards', { project_id: project.id }, 'card_date'),
     store.list('expenses', { project_id: project.id }, 'exp_date'), store.list('claims', { project_id: project.id }, 'claim_date'),
-    store.list('site_instructions', { project_id: project.id }), store.list('tasks', { project_id: project.id }, null), getSetting(store, 'casual_day_rate', null)]);
+    store.list('site_instructions', { project_id: project.id }), store.list('tasks', { project_id: project.id }, null), getSetting(store, 'casual_day_rate', null),
+    store.list('staff', {}, null), store.list('contracts', { project_id: project.id }, null), store.list('sub_certs', { project_id: project.id }, 'cert_date')]);
+  const staffBy = Object.fromEntries(staff.map(s => [s.id, s]));
   const cost = Object.fromEntries(costRows.map(c => [c.item_key, c]));
   const catOf = {}; D.items.forEach(i => catOf[i.item_key] = i.category || 'Other');
   const cats = {};
@@ -28,7 +31,9 @@ export async function projectFinancials(store, project) {
   for (const po of D.pos.filter(p => COMMITTED.includes(p.status))) {
     for (const l of D.poLines.filter(l => l.po_id === po.id)) {
       const v = Number(l.qty) * Number(l.unit_price), k = catOf[l.item_key] || 'Other';
-      C(k).committed += v; if (po.status === 'received') C(k).received += v;
+      C(k).committed += v;
+      if (po.status === 'received') C(k).received += v;
+      else if (po.status === 'part') C(k).received += Math.min(Number(l.qty_received) || 0, Number(l.qty)) * Number(l.unit_price);
     }
   }
   // Labour from submitted / approved jobcards
@@ -36,10 +41,17 @@ export async function projectFinancials(store, project) {
   for (const j of jobcards.filter(j => j.status !== 'draft')) for (const s of j.staff || []) {
     const days = (Number(s.hours) || 8) / 8 * (Number(s.count) || 1);
     personDays += days;
-    const rate = s.day_rate != null ? Number(s.day_rate) : s.casual ? (casualRate != null ? Number(casualRate) : null) : null;
+    const reg = s.staff_id ? dayCost(staffBy[s.staff_id]) : null;
+    const rate = reg != null ? reg : s.day_rate != null ? Number(s.day_rate) : s.casual ? (casualRate != null ? Number(casualRate) : null) : null;
     if (rate == null) labourUnpriced += days; else C('Labour').labour += days * rate;
   }
   for (const e of expenses) C(e.category || 'Other').expenses += Number(e.amount) || 0;
+  // Subcontractors: committed = signed subcontract sums; actual = latest approved certificate (gross value to date).
+  const subs = contracts.filter(c => c.type === 'subcontract' && c.status === 'signed');
+  for (const c of subs) { const S = C('Subcontractors'); S.committed += Number(c.data?.contract_sum) || 0; S.budget += 0; }
+  const lastCert = {};
+  for (const sc of subCerts.filter(x => ['approved', 'paid'].includes(x.status))) if (!lastCert[sc.contract_id] || String(sc.cert_date) >= String(lastCert[sc.contract_id].cert_date)) lastCert[sc.contract_id] = sc;
+  for (const sc of Object.values(lastCert)) C('Subcontractors').received += Number(sc.gross_to_date) || 0;
   const rows = Object.values(cats).map(r => ({ ...r, actual: r.received + r.labour + r.expenses, forecast: Math.max(r.budget, r.committed + r.labour + r.expenses) }))
     .sort((a, b) => (CATEGORIES.indexOf(a.cat) + 1 || 99) - (CATEGORIES.indexOf(b.cat) + 1 || 99));
   const T = k => rows.reduce((t, r) => t + r[k], 0);
@@ -51,7 +63,9 @@ export async function projectFinancials(store, project) {
     budget: T('budget'), committed: T('committed'), received: T('received'), labour: T('labour'), expensesTotal: T('expenses'), actual: T('actual'), forecast: T('forecast'),
     claimed: claims.reduce((t, c) => t + (Number(c.claimed) || 0), 0), certified: claims.reduce((t, c) => t + (Number(c.certified) || 0), 0), paid: claims.reduce((t, c) => t + (Number(c.paid) || 0), 0),
     personDays, labourUnpriced, unpricedBudget, missingMarkup, progress: progress(tasks),
-    pendingPOs: D.pos.filter(p => p.status === 'pending'), D, jobcards, expenses, claims, sis, tasks,
+    pendingPOs: D.pos.filter(p => p.status === 'pending'), D, jobcards, expenses, claims, sis, tasks, subCerts, contracts, staffBy,
+    subPaid: subCerts.filter(x => x.status === 'paid').reduce((t, x) => t + (Number(x.amount_due) || 0), 0),
+    subDue: subCerts.filter(x => x.status === 'approved').reduce((t, x) => t + (Number(x.amount_due) || 0), 0),
   };
   fin.margin = fin.revenue - fin.forecast;
   fin.marginPct = fin.revenue ? fin.margin / fin.revenue : null;
@@ -100,17 +114,16 @@ export async function render(root, ctx) {
       </tbody></table></div></section>
 
     <div class="grid2" style="align-items:start">
-      <section class="card"><div class="hd"><h3>Claims & payment certificates</h3><span class="grow"></span><button class="btn small primary" id="addc">+ Claim</button></div>
-        <div class="bd small">Claimed <b>${money(F.claimed, 0)}</b> · certified <b>${money(F.certified, 0)}</b> · paid <b>${money(F.paid, 0)}</b> · outstanding <b style="color:${F.certified - F.paid > 0 ? 'var(--warn)' : 'inherit'}">${money(F.certified - F.paid, 0)}</b></div>
-        ${F.claims.length ? `<div class="tbl"><table><thead><tr><th>Claim</th><th class="n">Claimed</th><th class="n">Certified</th><th class="n">Paid</th></tr></thead><tbody>${[...F.claims].reverse().map(c => `<tr class="click" data-c="${c.id}"><td><b>${esc(c.number)}</b><div class="small muted">${fmtDate(c.claim_date)}</div></td><td class="n">${fmt(c.claimed, 2)}</td><td class="n">${fmt(c.certified, 2)}</td><td class="n">${c.paid ? fmt(c.paid, 2) : '<span class="flag">unpaid</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No claims yet.</div>'}</section>
+      <section class="card"><div class="hd"><h3>Certificates</h3><span class="grow"></span><a class="btn small primary" href="#/p/${project.id}/certs">Open certificates</a></div>
+        <div class="bd small stack" style="gap:4px"><div>Client: certified <b>${money(F.certified, 0)}</b> · paid <b>${money(F.paid, 0)}</b> · outstanding <b style="color:${F.certified - F.paid > 0 ? 'var(--warn)' : 'inherit'}">${money(F.certified - F.paid, 0)}</b></div>
+          <div>Subcontractors: approved, not yet paid <b>${money(F.subDue, 0)}</b> · paid <b>${money(F.subPaid, 0)}</b></div>
+          <div class="muted">Certificates are valued from the jobcards and the programme. Matt or the QS can amend them before issuing.</div></div></section>
       <section class="card"><div class="hd"><h3>Other expenses</h3><span class="small muted">fuel, hire, petty cash, transport</span><span class="grow"></span><button class="btn small primary" id="adde">+ Expense</button></div>
         ${F.expenses.length ? `<div class="tbl"><table><thead><tr><th>Date</th><th>Item</th><th>Category</th><th class="n">Amount</th></tr></thead><tbody>${[...F.expenses].reverse().map(e => `<tr class="click" data-e="${e.id}"><td>${fmtDate(e.exp_date)}</td><td>${esc(e.description || '')}<div class="small muted">${esc(e.supplier || '')}</div></td><td class="small">${esc(e.category || '')}</td><td class="n">${fmt(e.amount, 2)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No expenses recorded.</div>'}</section>
     </div>
     <section class="card"><div class="hd"><h3>Labour from jobcards</h3></div><div class="bd small">${fmt(F.personDays, 1)} person-days on ${F.jobcards.filter(j => j.status !== 'draft').length} submitted jobcards · labour cost ${money(F.labour, 0)}</div></section>
   </div>`;
   const $ = s => root.querySelector(s);
-  $('#addc').onclick = () => editClaim(ctx, F, null);
-  root.querySelectorAll('[data-c]').forEach(r => r.onclick = () => editClaim(ctx, F, F.claims.find(c => c.id === r.dataset.c)));
   $('#adde').onclick = () => editExpense(ctx, null);
   root.querySelectorAll('[data-e]').forEach(r => r.onclick = () => editExpense(ctx, F.expenses.find(e => e.id === r.dataset.e)));
   $('#print').onclick = () => openReportDoc(project, F, chart(F.rows));
