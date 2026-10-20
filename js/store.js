@@ -5,7 +5,7 @@ import { CONFIG } from './config.js';
 import { uid } from './util.js';
 
 const CHILDREN = {
-  projects: [['areas', 'project_id'], ['spec_items', 'project_id'], ['rfqs', 'project_id'], ['quotes', 'project_id'], ['selections', 'project_id'], ['purchase_orders', 'project_id'], ['costing', 'project_id'], ['claude_log', 'project_id']],
+  projects: [['areas', 'project_id'], ['spec_items', 'project_id'], ['rfqs', 'project_id'], ['quotes', 'project_id'], ['selections', 'project_id'], ['purchase_orders', 'project_id'], ['costing', 'project_id'], ['claude_log', 'project_id'], ['tasks', 'project_id'], ['jobcards', 'project_id'], ['site_instructions', 'project_id'], ['requests', 'project_id'], ['expenses', 'project_id'], ['claims', 'project_id']],
   areas: [['spec_items', 'area_id']],
   rfqs: [['rfq_lines', 'rfq_id']],
   quotes: [['quote_lines', 'quote_id']],
@@ -51,12 +51,12 @@ class CloudStore {
   async insert(table, rows) {
     const arr = Array.isArray(rows) ? rows : [rows];
     const me = await this.me();
-    const withMeta = arr.map(r => ['team', 'suppliers', 'library_prices', 'rfq_lines', 'quote_lines', 'po_lines', 'costing', 'selections'].includes(table) || r.created_by ? r : { ...r, created_by: me?.id });
+    const withMeta = arr.map(r => ['team', 'suppliers', 'library_prices', 'rfq_lines', 'quote_lines', 'po_lines', 'costing', 'selections', 'staff', 'app_settings'].includes(table) || r.created_by ? r : { ...r, created_by: me?.id });
     const { data, error } = await this.sb.from(table).insert(withMeta).select(); if (error) throw error;
     return Array.isArray(rows) ? data : data[0];
   }
   async update(table, id, patch) {
-    const p = ['projects', 'areas', 'spec_items'].includes(table) ? { ...patch, updated_at: new Date().toISOString() } : patch;
+    const p = ['projects', 'areas', 'spec_items', 'tasks', 'jobcards'].includes(table) ? { ...patch, updated_at: new Date().toISOString() } : patch;
     const { data, error } = await this.sb.from(table).update(p).eq('id', id).select().maybeSingle(); if (error) throw error; return data;
   }
   async upsert(table, row, onConflict) { const { data, error } = await this.sb.from(table).upsert(row, { onConflict }).select().maybeSingle(); if (error) throw error; return data; }
@@ -121,6 +121,12 @@ class DemoStore {
   }
   async claude() { throw new Error('Claude needs the app connected to its server (Settings → Server). Demo mode runs only in this browser.'); }
 }
+
+// Small key/value settings shared by the team (e.g. transport rates).
+export async function getSetting(store, key, fallback) {
+  try { const rows = await store.list('app_settings', { key }, null); return rows[0]?.value ?? fallback; } catch (e) { return fallback; }
+}
+export async function setSetting(store, key, value) { return store.upsert('app_settings', { key, value, updated_at: new Date().toISOString() }, 'key'); }
 
 export function makeStore() {
   const cfg = serverConfig();

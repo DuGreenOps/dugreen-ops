@@ -13,9 +13,10 @@ export async function render(root, ctx) {
   const cost = Object.fromEntries(costRows.map(c => [c.item_key, c]));
   const vatRate = Number(project.vat_rate ?? 0.15);
 
+  const itemBy = Object.fromEntries(D.items.map(i => [i.item_key, i]));
   const rate = key => {
-    const c = cost[key] || {}, s = D.selBy[key];
-    const costRate = c.cost_override != null ? Number(c.cost_override) : s ? Number(s.unit_price) : null;
+    const c = cost[key] || {}, s = D.selBy[key], est = itemBy[key]?.unit_cost;
+    const costRate = c.cost_override != null ? Number(c.cost_override) : s ? Number(s.unit_price) : est != null ? Number(est) : null;
     const sell = c.sell_override != null ? Number(c.sell_override) : costRate != null && c.markup_pct != null ? Math.round(costRate * (1 + Number(c.markup_pct) / 100) * 100) / 100 : null;
     const applied = c.sell_override != null && costRate ? (Number(c.sell_override) / costRate - 1) * 100 : c.markup_pct;
     return { costRate, sell, applied, c, s };
@@ -47,8 +48,8 @@ export async function render(root, ctx) {
     tbl.innerHTML = rows.length ? `<table><thead><tr><th>Item</th><th class="n">Qty</th><th>Unit</th><th class="n">Cost rate</th><th>Supplier</th><th class="n">Mark-up %</th><th class="n">Fixed sell rate</th><th class="n">Sell rate</th><th class="n">Total sell</th><th class="n">Profit</th></tr></thead><tbody>
       ${order.map(c => `<tr class="sec"><td colspan="10">${esc(c)}</td></tr>` + cats[c].map(r => `<tr>
         <td><b>${esc(r.description)}</b>${r.spec ? `<div class="small muted">${esc(r.spec)}</div>` : ''}</td><td class="n">${fmt(r.qty, 2)}</td><td>${esc(r.unit)}</td>
-        <td class="n"><input class="num" data-k="${esc(r.item_key)}" data-f="cost_override" inputmode="decimal" value="${r.c.cost_override ?? ''}" placeholder="${r.s ? fmt(r.s.unit_price, 2) : 'cost'}" aria-label="Cost rate for ${esc(r.description)}" title="Leave blank to use the selected supplier price"></td>
-        <td class="small">${r.s ? esc(D.sup[r.s.supplier_id]?.name || '') : '<span class="flag">not priced</span>'}</td>
+        <td class="n"><input class="num" data-k="${esc(r.item_key)}" data-f="cost_override" inputmode="decimal" value="${r.c.cost_override ?? ''}" placeholder="${r.s ? fmt(r.s.unit_price, 2) : r.unit_cost != null ? fmt(r.unit_cost, 2) : 'cost'}" aria-label="Cost rate for ${esc(r.description)}" title="Leave blank to use the selected supplier price"></td>
+        <td class="small">${r.c.cost_override != null ? 'Cost typed here' : r.s ? esc(D.sup[r.s.supplier_id]?.name || '') : r.unit_cost != null ? 'QS estimate' : '<span class="flag">not priced</span>'}</td>
         <td class="n"><input class="num" style="width:76px" data-k="${esc(r.item_key)}" data-f="markup_pct" inputmode="decimal" value="${r.c.markup_pct ?? ''}" aria-label="Mark-up percent for ${esc(r.description)}"></td>
         <td class="n"><input class="num" data-k="${esc(r.item_key)}" data-f="sell_override" inputmode="decimal" value="${r.c.sell_override ?? ''}" aria-label="Fixed selling rate for ${esc(r.description)}"></td>
         <td class="n">${r.sell != null ? fmt(r.sell, 2) : (r.costRate != null ? '<span class="flag">set mark-up</span>' : '–')}${r.c.sell_override != null && r.applied != null ? `<div class="small muted">${fmt(r.applied, 1)}%</div>` : ''}</td>
@@ -69,7 +70,7 @@ export async function render(root, ctx) {
     tbl.innerHTML = groups.length ? `<table><thead><tr><th>Item</th><th class="n">Qty</th><th>Unit</th><th class="n">Rate</th><th class="n">Amount</th></tr></thead><tbody>
       ${groups.map(g => {
         let st = 0;
-        const body = g.lines.map(l => { const q = computeQty(l, g.a); const r = rate(l.item_key); const amt = r.sell != null ? r.sell * q : null; st += amt || 0; return `<tr><td>${esc(l.description)}${l.spec ? `<div class="small muted">${esc(l.spec)}</div>` : ''}</td><td class="n">${fmt(q, 2)}</td><td>${esc(l.unit)}</td><td class="n">${r.sell != null ? fmt(r.sell, 2) : '<span class="flag">–</span>'}</td><td class="n">${amt != null ? fmt(amt, 2) : '–'}</td></tr>`; }).join('');
+        const body = g.lines.map(l => { const q = computeQty(l, g.a, { items: D.spec, areasById: Object.fromEntries(D.areas.map(a => [a.id, a])) }); const r = rate(l.item_key); const amt = r.sell != null ? r.sell * q : null; st += amt || 0; return `<tr><td>${esc(l.description)}${l.spec ? `<div class="small muted">${esc(l.spec)}</div>` : ''}</td><td class="n">${fmt(q, 2)}</td><td>${esc(l.unit)}</td><td class="n">${r.sell != null ? fmt(r.sell, 2) : '<span class="flag">–</span>'}</td><td class="n">${amt != null ? fmt(amt, 2) : '–'}</td></tr>`; }).join('');
         grand += st;
         return `<tr class="sec"><td colspan="5">${g.a ? `<span class="code" style="background:${typeColor(g.a.type)}">${esc(g.a.code || '')}</span> ${esc(g.a.name || g.a.type || '')}` : 'Site-wide'}</td></tr>${body}<tr><td colspan="4"><b>Subtotal</b></td><td class="n"><b>${fmt(st, 2)}</b></td></tr>`;
       }).join('')}
@@ -78,7 +79,7 @@ export async function render(root, ctx) {
 
   // ---- exports
   const header = ['Item Key', 'Category', 'Description', 'Spec', 'Unit', 'Total Qty', 'Cost Rate', 'Supplier', 'Mark-up %', 'Fixed Selling Rate', 'Selling Rate', 'Total Cost', 'Total Selling', 'Profit'];
-  const data = rows.map(r => [r.item_key, r.category, r.description, r.spec || '', r.unit, +r.qty.toFixed(2), r.costRate ?? '', r.s ? D.sup[r.s.supplier_id]?.name || '' : '', r.c.markup_pct ?? '', r.c.sell_override ?? '', r.sell ?? '',
+  const data = rows.map(r => [r.item_key, r.category, r.description, r.spec || '', r.unit, +r.qty.toFixed(2), r.costRate ?? '', r.s ? D.sup[r.s.supplier_id]?.name || '' : r.unit_cost != null ? 'QS estimate' : '', r.c.markup_pct ?? '', r.c.sell_override ?? '', r.sell ?? '',
     r.costRate != null ? +(r.costRate * r.qty).toFixed(2) : '', r.sell != null ? +(r.sell * r.qty).toFixed(2) : '', r.sell != null && r.costRate != null ? +((r.sell - r.costRate) * r.qty).toFixed(2) : '']);
   root.querySelector('#copy').onclick = async () => { (await copyText([header, ...data].map(r => r.join('\t')).join('\n'))) ? toast('Copied. Paste into a Google Sheet.') : toast('Copy failed on this device.'); };
   root.querySelector('#csv').onclick = () => {

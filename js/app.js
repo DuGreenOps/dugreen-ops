@@ -8,6 +8,13 @@ import * as Spec from './spec.js';
 import * as Procure from './procure.js';
 import * as Costing from './costing.js';
 import * as Library from './library.js';
+import * as Pow from './pow.js';
+import * as Site from './site.js';
+import * as Costs from './costs.js';
+import * as Staff from './staff.js';
+import * as Dashboard from './dashboard.js';
+import { renderVehicleSettings } from './staff.js';
+import { getSetting, setSetting } from './store.js';
 import { openClaude } from './claude.js';
 
 const store = makeStore();
@@ -15,7 +22,7 @@ const app = document.getElementById('app');
 let me = null;
 let cleanup = null;
 
-export const ctx = { store, get me() { return me; }, go, reload: route };
+export const ctx = { store, get me() { return me; }, go, reload: route, newProject: () => editProject() };
 window.__dg = ctx; // handy for debugging
 
 function go(hash) { if (location.hash === hash) route(); else location.hash = hash; }
@@ -38,7 +45,7 @@ async function route() {
   if (cleanup) { try { cleanup(); } catch (e) { } cleanup = null; }
   document.querySelector('.fab')?.remove();
   const hash = location.hash || '#/';
-  const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  const parts = hash.split('?')[0].replace(/^#\/?/, '').split('/').filter(Boolean);
 
   // Password recovery link from email
   if (/type=recovery/.test(location.hash)) return renderRecovery();
@@ -53,10 +60,12 @@ async function route() {
   banner();
 
   try {
-    if (parts[0] === 'p' && parts[1]) return await renderProject(parts[1], parts[2] || 'areas', parts.slice(3));
+    if (parts[0] === 'p' && parts[1]) return await renderProject(parts[1], parts[2] || (me?.role === 'supervisor' ? 'site' : 'areas'), parts.slice(3));
+    if (parts[0] === 'projects') { setNav('projects'); return await renderHome(); }
+    if (parts[0] === 'staff') { setNav('staff'); return await Staff.render(app, ctx); }
     if (parts[0] === 'library') { setNav('library'); return await Library.render(app, ctx, parts.slice(1)); }
     if (parts[0] === 'settings') { setNav('settings'); return await renderSettings(); }
-    setNav('projects'); return await renderHome();
+    setNav('home'); return await Dashboard.render(app, ctx);
   } catch (e) {
     console.error(e);
     app.innerHTML = `<div class="page"><div class="card"><div class="bd"><h2>Something went wrong</h2><p class="muted">${esc(e.message || e)}</p><button class="btn" onclick="location.reload()">Reload</button></div></div></div>`;
@@ -158,7 +167,7 @@ async function editProject(p) {
 }
 
 // --------------------------------------------------------------- project
-const TABS = [['areas', 'Areas'], ['map', 'Map'], ['spec', 'Specification'], ['procure', 'Procurement'], ['costing', 'Costing & BOQ']];
+const TABS = [['areas', 'Areas'], ['map', 'Map'], ['spec', 'Specification'], ['pow', 'Programme'], ['procure', 'Procurement'], ['costing', 'Costing & BOQ'], ['site', 'Site diary'], ['costs', 'Costs & reports']];
 async function renderProject(id, tab, rest) {
   setNav('projects');
   const project = await store.get('projects', id);
@@ -174,7 +183,7 @@ async function renderProject(id, tab, rest) {
     </div></div><div id="pbody"></div>`;
   app.querySelector('#pedit').onclick = () => editProject(project);
   const body = app.querySelector('#pbody');
-  const view = { areas: Areas, map: MapView, spec: Spec, procure: Procure, costing: Costing }[tab] || Areas;
+  const view = { areas: Areas, map: MapView, spec: Spec, procure: Procure, costing: Costing, pow: Pow, site: Site, costs: Costs }[tab] || Areas;
   const c = await view.render(body, pctx);
   if (typeof c === 'function') cleanup = c;
   if (tab !== 'map') {
@@ -202,6 +211,8 @@ async function renderSettings() {
       <div class="tbl"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th>${isAdmin ? '<th></th>' : ''}</tr></thead><tbody>
       ${team.map(t => `<tr><td>${esc(t.full_name)}</td><td>${esc(t.email)}</td><td>${esc(ROLES[t.role] || t.role)}</td>${isAdmin ? `<td class="n"><button class="btn small" data-edit="${esc(t.email)}">Edit</button></td>` : ''}</tr>`).join('')}
       </tbody></table></div></section>` : ''}
+    <section class="card"><div class="hd"><h2>Transport rates</h2><span class="small muted">Defaults offered when the QS adds a transport line</span></div><div id="vset"></div>
+      <div class="bd row"><label class="f" style="max-width:240px">Casual worker day rate (E)<input id="crate" inputmode="decimal" ${isAdmin || store.mode === 'demo' ? '' : 'disabled'}></label><span class="small muted">Used for labour cost when casuals are booked on a jobcard.</span></div></section>
     <section class="card"><div class="hd"><h2>Server</h2><span class="pill ${store.mode === 'cloud' ? 'ok' : 'warn'}">${store.mode === 'cloud' ? 'Connected' : 'Demo mode'}</span></div><div class="bd stack">
       <p class="small muted">The shared server (Supabase) stores the team's data and files and runs Claude for the app. Your administrator sets this up once.</p>
       <div class="grid2"><label class="f">Server URL<input id="surl" value="${esc(cfg?.url || '')}" placeholder="https://xxxx.supabase.co"></label>
@@ -214,6 +225,9 @@ async function renderSettings() {
     <p class="small muted">Du Green Ops · version 1.0 · Satellite imagery: Esri World Imagery · Street map: © OpenStreetMap contributors</p>
   </div>`;
   const $ = s => app.querySelector(s);
+  renderVehicleSettings(app.querySelector('#vset'), store, isAdmin || store.mode === 'demo');
+  getSetting(store, 'casual_day_rate', null).then(v => { $('#crate').value = v ?? ''; });
+  $('#crate').onchange = async e => { await setSetting(store, 'casual_day_rate', num(e.target.value)); toast('Casual day rate saved'); };
   $('#so') && ($('#so').onclick = async () => { await store.signOut(); location.hash = '#/'; location.reload(); });
   $('#drole') && ($('#drole').onchange = e => { localStorage.setItem('dg-demo-role', e.target.value); route(); });
   $('#ssave').onclick = () => {

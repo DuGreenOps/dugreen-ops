@@ -1,11 +1,18 @@
 // Shared helpers: escaping, formatting, ids, dialogs, toasts.
 export const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36));
-export const num = v => { if (v === '' || v == null) return null; const n = Number(String(v).replace(/[ ,]/g, '')); return Number.isFinite(n) ? n : null; };
+// Accepts "1 250.5", "1,250.5" and decimal commas like "0,5" or "12,75".
+export const num = v => {
+  if (v === '' || v == null) return null;
+  let s = String(v).trim().replace(/\s/g, '');
+  if (s.includes(',') && !s.includes('.')) { const tail = s.split(',').pop(); s = tail.length === 3 && s.split(',').length > 1 && !/^0,/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.'); }
+  else s = s.replace(/,/g, '');
+  const n = Number(s); return Number.isFinite(n) ? n : null;
+};
 const nf = (d) => new Intl.NumberFormat('en-ZA', { minimumFractionDigits: d, maximumFractionDigits: d });
 export const fmt = (n, d = 0) => n == null || Number.isNaN(n) ? '–' : nf(d).format(n).replace(/ /g, ' ');
 export const money = (n, d = 2) => n == null || Number.isNaN(n) ? '–' : 'E ' + fmt(n, d);
-export const today = () => new Date().toISOString().slice(0, 10);
+export const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 export const fmtDate = d => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '–';
 
 // Normalised key that groups the "same product" across areas, RFQs, quotes and the library.
@@ -15,7 +22,16 @@ export function itemKey(description, spec, unit) {
 }
 
 export const UNITS = ['each', 'm²', 'm', 'm³', 'bag', 'load', 'kg', 'L', 'tray', 'roll', 'item', 'hour', 'day', 'week', 'month', 'trip'];
-export const CATEGORIES = ['Plants', 'Trees', 'Lawn & grassing', 'Hardscaping', 'Irrigation & piping', 'Soil & fertiliser', 'Earthworks', 'Drainage', 'Structures & furniture', 'Labour', 'Plant hire & transport', 'Preliminaries', 'Maintenance', 'Other'];
+export const CATEGORIES = ['Plants', 'Trees', 'Lawn & grassing', 'Hardscaping', 'Irrigation & piping', 'Soil & fertiliser', 'Earthworks', 'Drainage', 'Structures & furniture', 'Labour', 'Transport', 'Plant hire & transport', 'Preliminaries', 'Maintenance', 'Other'];
+// Transport planning presets (cost is entered by the QS; defaults can be changed in Settings).
+export const VEHICLES = [
+  { key: '8t truck', basis: 'load', capacity_m3: 6, cost: null },
+  { key: '4t truck', basis: 'load', capacity_m3: 3, cost: null },
+  { key: 'Tipper 10m³', basis: 'load', capacity_m3: 10, cost: null },
+  { key: 'LDV (bakkie)', basis: 'trip', capacity_m3: 1, cost: null },
+  { key: 'Flatbed / lowbed', basis: 'load', capacity_m3: null, cost: null },
+  { key: 'Water cart', basis: 'trip', capacity_m3: null, cost: null },
+];
 export const AREA_TYPES = [
   { key: 'Garden', prefix: 'G', color: '#5CC245' },
   { key: 'Lawn', prefix: 'L', color: '#B7E34D' },
@@ -26,7 +42,11 @@ export const AREA_TYPES = [
   { key: 'Other', prefix: 'X', color: '#E86FB0' },
 ];
 export const typeColor = t => (AREA_TYPES.find(a => a.key === t) || AREA_TYPES[AREA_TYPES.length - 1]).color;
-export const ROLES = { admin: 'Admin', qs: 'Quantity Surveyor', horticulturist: 'Horticulturist', procurement: 'Procurement', viewer: 'Viewer', pending: 'Awaiting access' };
+export const ROLES = { admin: 'Admin', qs: 'Quantity Surveyor', horticulturist: 'Horticulturist', procurement: 'Procurement', supervisor: 'Site Supervisor', viewer: 'Viewer', pending: 'Awaiting access' };
+// Date-only maths in UTC so it never shifts a day in Eswatini (UTC+2) or anywhere else.
+export const addDays = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+export const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+export const weekStart = d => { const x = new Date(d + 'T00:00:00Z'); const wd = (x.getUTCDay() + 6) % 7; x.setUTCDate(x.getUTCDate() - wd); return x.toISOString().slice(0, 10); };
 
 export function toast(msg, ms = 2800) {
   const t = document.createElement('div');

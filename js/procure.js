@@ -85,7 +85,7 @@ function itemsView(el, ctx, D) {
       const opts = priceOptions(D, i.item_key), best = opts[0], s = D.selBy[i.item_key];
       return `<tr><td><b>${esc(i.description)}</b>${i.spec ? `<div class="small muted">${esc(i.spec)}</div>` : ''}${i.extra ? '<div class="small muted">Added on an RFQ</div>' : ''}</td>
         <td class="n">${fmt(i.qty, 2)}</td><td>${esc(i.unit)}</td>
-        <td class="small">${best ? `${money(best.unit_price)} · ${esc(D.sup[best.supplier_id]?.name || '?')} <span class="muted">(${best.source === 'quote' ? 'quote' : 'library'} ${fmtDate(best.date)})</span>` : '<span class="muted">No prices yet</span>'}</td>
+        <td class="small">${best ? `${money(best.unit_price)} · ${esc(D.sup[best.supplier_id]?.name || '?')} <span class="muted">(${best.source === 'quote' ? 'quote' : 'library'} ${fmtDate(best.date)})</span>` : i.unit_cost != null ? `<span class="muted">QS estimate</span> ${money(i.unit_cost)}` : '<span class="muted">No prices yet</span>'}</td>
         <td class="small">${s ? `<span class="pill ok">${esc(D.sup[s.supplier_id]?.name || '?')}</span> ${money(s.unit_price)}` : '<span class="pill warn">Not priced</span>'}${D.onPo.has(i.item_key) ? ' <span class="pill info">On PO</span>' : ''}</td>
         <td class="n">${s ? money(s.unit_price * i.qty) : '–'}</td>
         <td class="n"><button class="btn small" data-pick="${esc(i.item_key)}">Choose price</button></td></tr>`;
@@ -136,7 +136,8 @@ function rfqList(el, ctx, D) {
   el.querySelector('#new').onclick = () => editRfq(ctx, D, null);
   el.querySelectorAll('[data-r]').forEach(r => r.onclick = () => ctx.go(`#/p/${project.id}/procure/rfq/${r.dataset.r}`));
 }
-const statusPill = s => `<span class="pill ${s === 'sent' ? 'info' : s === 'closed' ? 'mute' : s === 'issued' ? 'info' : s === 'received' ? 'ok' : 'warn'}">${esc({ draft: 'Draft', sent: 'Sent', closed: 'Closed', issued: 'Issued', received: 'Delivered' }[s] || s)}</span>`;
+export const PO_STATUS = { draft: 'Draft', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Rejected', issued: 'Issued to supplier', received: 'Delivered' };
+export const statusPill = s => `<span class="pill ${['sent', 'issued', 'pending'].includes(s) ? 'info' : s === 'closed' ? 'mute' : ['received', 'approved'].includes(s) ? 'ok' : s === 'rejected' ? 'bad' : 'warn'}">${esc({ ...PO_STATUS, sent: 'Sent', closed: 'Closed' }[s] || s)}</span>`;
 
 async function editRfq(ctx, D, rfq) {
   const { store, project } = ctx;
@@ -389,8 +390,10 @@ async function generatePOs(ctx) {
 
 function poList(el, ctx, D) {
   const { project } = ctx;
+  const pend = D.pos.filter(p => p.status === 'pending').length;
   const total = po => { const ls = D.poLines.filter(l => l.po_id === po.id); const sub = ls.reduce((t, l) => t + Number(l.qty) * Number(l.unit_price), 0); return sub * (1 + Number(po.vat_rate ?? 0.15)); };
   el.innerHTML = `<section class="card"><div class="hd"><h3>Purchase orders</h3><span class="grow"></span><button class="btn primary" id="gen">Generate from selected prices</button></div>
+    ${pend ? `<div class="note warn" style="margin:12px 14px">${pend} purchase order${pend > 1 ? 's are' : ' is'} awaiting approval${ctx.me?.role === 'admin' ? ' by you' : ' by Matt'}.</div>` : ''}
     ${D.pos.length ? `<div class="tbl"><table><thead><tr><th>PO</th><th>Supplier</th><th class="n">Lines</th><th class="n">Total incl. VAT</th><th>Status</th></tr></thead><tbody>
     ${[...D.pos].reverse().map(p => `<tr class="click" data-p="${p.id}"><td><b>${esc(p.number)}</b><div class="small muted">${fmtDate(p.po_date)}</div></td><td>${esc(D.sup[p.supplier_id]?.name || '?')}</td>
       <td class="n">${D.poLines.filter(l => l.po_id === p.id).length}</td><td class="n">${money(total(p))}</td><td>${statusPill(p.status)}</td></tr>`).join('')}</tbody></table></div>`
@@ -408,7 +411,7 @@ function poDetail(el, ctx, D, poId) {
   const vat = Number(po.vat_rate ?? 0.15);
   const sub = lines.reduce((t, l) => t + Number(l.qty) * Number(l.unit_price), 0);
   el.innerHTML = `<section class="card"><div class="hd"><div class="grow"><div class="small muted"><a href="#/p/${project.id}/procure/pos">Purchase orders</a> /</div><h3>${esc(po.number)} · ${esc(s.name || '')}</h3></div>
-      <select id="st" style="width:auto" aria-label="PO status">${['draft', 'issued', 'received'].map(x => `<option value="${x}" ${po.status === x ? 'selected' : ''}>${{ draft: 'Draft', issued: 'Issued', received: 'Delivered' }[x]}</option>`).join('')}</select>
+      ${statusPill(po.status)}${poActions(po, ctx.me)}
       <button class="btn" id="doc">Document / PDF</button>${s.email ? `<a class="btn" href="mailto:${esc(s.email)}?subject=${encodeURIComponent('Purchase order ' + po.number + ' – ' + project.name)}&body=${encodeURIComponent(`Dear ${s.contact || s.name},\n\nPlease find our purchase order ${po.number} for ${project.name} attached.\n\nKind regards,\nDu Green Procurement`)}">Email</a>` : ''}
       <button class="btn danger" id="del">Delete</button></div>
     <div class="bd grid2"><label class="f">Deliver to<input id="dl" value="${esc(po.delivery || '')}"></label><label class="f">Notes<input id="nt" value="${esc(po.notes || '')}"></label></div>
@@ -417,10 +420,33 @@ function poDetail(el, ctx, D, poId) {
       <td class="n"><input class="num" data-l="${l.id}" data-f="unit_price" value="${l.unit_price}" inputmode="decimal" aria-label="Unit price"></td><td class="n">${money(Number(l.qty) * Number(l.unit_price))}</td></tr>`).join('')}
     <tr class="tot"><td colspan="4">Subtotal</td><td class="n">${money(sub)}</td></tr><tr><td colspan="4">VAT ${fmt(vat * 100)}%</td><td class="n">${money(sub * vat)}</td></tr><tr class="tot"><td colspan="4">Total</td><td class="n">${money(sub * (1 + vat))}</td></tr>
     </tbody></table></div></section>`;
-  el.querySelector('#st').onchange = async e => { await store.update('purchase_orders', po.id, { status: e.target.value }); ctx.reload(); };
+  el.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => { await poAct(store, po, b.dataset.act, ctx.me); ctx.reload(); });
+  if (!['draft', 'pending', 'rejected'].includes(po.status)) el.querySelectorAll('[data-l]').forEach(i => i.disabled = true);
   el.querySelector('#doc').onclick = () => openPoDoc(po, lines, project, s);
   el.querySelector('#del').onclick = async () => { if (await confirmDlg('Delete PO?', `Delete ${po.number}? Its items become available for a new PO.`)) { await store.remove('purchase_orders', po.id); ctx.go(`#/p/${project.id}/procure/pos`); } };
   el.querySelector('#dl').onchange = e => store.update('purchase_orders', po.id, { delivery: e.target.value });
   el.querySelector('#nt').onchange = e => store.update('purchase_orders', po.id, { notes: e.target.value });
   el.querySelectorAll('[data-l]').forEach(i => i.onchange = async () => { await store.update('po_lines', i.dataset.l, { [i.dataset.f]: num(i.value) ?? 0 }); ctx.reload(); });
+}
+
+// ---- PO approval flow: draft → awaiting approval → approved → issued → delivered
+export function poActions(po, me) {
+  const admin = me?.role === 'admin';
+  const b = (act, label, cls = '') => `<button class="btn ${cls}" data-act="${act}">${label}</button>`;
+  switch (po.status) {
+    case 'draft': case 'rejected': return b('submit', 'Submit for approval', 'primary') + (admin ? b('approve', 'Approve now') : '');
+    case 'pending': return admin ? b('approve', 'Approve', 'primary') + b('reject', 'Reject', 'danger') : '<span class="small muted">Waiting for Matt to approve</span>';
+    case 'approved': return b('issue', 'Mark as sent to supplier', 'primary');
+    case 'issued': return b('receive', 'Mark as delivered', 'primary');
+    default: return '';
+  }
+}
+export async function poAct(store, po, act, me) {
+  const now = new Date().toISOString();
+  const patch = { submit: { status: 'pending', submitted_by: me?.id && me.id !== 'demo-user' ? me.id : null },
+    approve: { status: 'approved', approved_at: now, approved_by: me?.id && me.id !== 'demo-user' ? me.id : null },
+    reject: { status: 'rejected' }, issue: { status: 'issued' }, receive: { status: 'received', received_at: now } }[act];
+  if (!patch) return;
+  await store.update('purchase_orders', po.id, patch);
+  toast({ submit: 'Sent for approval', approve: 'Approved', reject: 'Rejected', issue: 'Marked as sent', receive: 'Marked as delivered' }[act]);
 }

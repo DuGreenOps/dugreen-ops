@@ -11,7 +11,23 @@ export async function projectSnapshot(store, project) {
     items: D.items.map(i => ({ item: i.description, spec: i.spec, unit: i.unit, qty: +i.qty.toFixed(2), category: i.category, selected_supplier: D.sup[D.selBy[i.item_key]?.supplier_id]?.name || null, unit_cost: D.selBy[i.item_key]?.unit_price ?? null, on_po: D.onPo.has(i.item_key) })),
     rfqs: D.rfqs.map(r => ({ number: r.number, title: r.title, status: r.status, suppliers: (r.supplier_ids || []).map(s => D.sup[s]?.name), quotes: D.quotes.filter(q => q.rfq_id === r.id).map(q => D.sup[q.supplier_id]?.name) })),
     purchase_orders: D.pos.map(p => ({ number: p.number, supplier: D.sup[p.supplier_id]?.name, status: p.status, lines: D.poLines.filter(l => l.po_id === p.id).length })),
+    ...(await extras(store, project)),
   };
+}
+
+async function extras(store, project) {
+  try {
+    const { projectFinancials } = await import('./costs.js');
+    const F = await projectFinancials(store, project);
+    const [reqs] = await Promise.all([store.list('requests', { project_id: project.id }, null)]);
+    return {
+      programme: F.tasks.map(t => ({ task: t.name, phase: t.phase, start: t.start_date, end: t.end_date, status: t.status, pct: t.pct })),
+      recent_jobcards: F.jobcards.slice(-10).map(j => ({ date: j.card_date, status: j.status, staff: (j.staff || []).reduce((n, s) => n + (Number(s.count) || 1), 0), issues: j.issues, done: (j.tasks || []).filter(t => t.state === 'done').map(t => t.name), other: (j.extra_tasks || []).map(x => x.text) })),
+      site_instructions: F.sis.map(s => ({ number: s.number, by: s.instructed_by, role: s.instructor_role, text: s.description, status: s.status, value: s.est_value })),
+      requests: reqs.map(r => ({ kind: r.kind, what: r.description, status: r.status, needed_by: r.needed_by })),
+      money: { contract: F.contract, variations: F.variations, budget_cost: F.budget, committed: F.committed, actual: F.actual, forecast_cost: F.forecast, forecast_margin: F.margin, claimed: F.claimed, certified: F.certified, paid: F.paid, by_category: F.rows.map(r => ({ category: r.cat, budget: +r.budget.toFixed(2), committed: +r.committed.toFixed(2), actual: +r.actual.toFixed(2) })) },
+    };
+  } catch (e) { return {}; }
 }
 
 export async function openClaude(ctx) {
@@ -21,7 +37,7 @@ export async function openClaude(ctx) {
   const render = w => {
     w.querySelector('.chat').innerHTML = history.length ? history.map(m => `<div class="msg ${m.role === 'user' ? 'me' : ''}">${esc(m.content)}</div>`).join('')
       : `<p class="muted">Ask about this project, for example:</p>
-         <div class="stack" style="gap:6px">${['Which items still have no price, and who could supply them?', 'Summarise the scope by area for the client.', 'Check the spec: is anything missing for a new garden bed install?', 'Draft a covering email for RFQ to nurseries.'].map(q => `<button class="btn small" style="justify-content:flex-start;white-space:normal;text-align:left" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`;
+         <div class="stack" style="gap:6px">${['Are we on programme and on budget? What needs attention?', 'Summarise this week from the jobcards for the client.', 'Which items still have no price?', 'Check the spec: is anything missing for a new garden bed install?'].map(q => `<button class="btn small" style="justify-content:flex-start;white-space:normal;text-align:left" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`;
     w.querySelectorAll('[data-q]').forEach(b => b.onclick = () => { w.querySelector('#cq').value = b.dataset.q; ask(w); });
     const box = w.querySelector('.dlg-body'); box.scrollTop = box.scrollHeight;
   };
