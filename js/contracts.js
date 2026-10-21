@@ -6,6 +6,11 @@ import { captureSignature } from './sign.js';
 import { getSetting } from './store.js';
 import { head, open } from './docs.js';
 import { CONFIG } from './config.js';
+import { photoInput, wirePhoto, photoUrls, thumb } from './photos.js';
+
+export const EWALLET_WARNING = 'Du Green Investments cannot be held responsible if the employee gives an incorrect or inactive EWallet number. Wages paid to a wrong or inactive number are the employee’s own responsibility and will only be re-sent once the funds are returned.';
+export const WALLETS = ['FNB eWallet', 'MTN MoMo', 'Eswatini Mobile e-Mali', 'Other'];
+const photoBlock = (P, who) => `${H('Photos')}<div class="row" style="gap:10px;align-items:flex-end">${[['idf', 'ID / passport – front'], ['idb', 'ID – back'], ['me', 'Photo of ' + who]].map(([k, l]) => `<div class="stack" style="gap:4px;align-items:flex-start"><span id="pv-${k}">${thumb(P[k], l, 84) || '<span style="display:inline-grid;place-items:center;width:84px;height:84px;border:1px dashed var(--line);border-radius:8px" class="small muted">none</span>'}</span>${photoInput('ph-' + k, '📷 ' + l)}</div>`).join('')}</div>`;
 
 export const CONTRACT_TYPES = {
   casual_short: { label: 'Casual labour contract (as-and-when)', short: 'Casual (as-and-when)', kinds: ['casual', 'staff'], prefix: 'CL' },
@@ -86,8 +91,8 @@ const F = (label, name, v, extra = '') => `<label class="f">${label}<input name=
 const SEL = (label, name, opts, v) => `<label class="f">${label}<select name="${name}">${opts.map(o => { const [k, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(k)}" ${String(v ?? '') === String(k) ? 'selected' : ''}>${esc(l)}</option>`; }).join('')}</select></label>`;
 const H = t => `<div class="cat-h" style="margin:14px 0 4px">${t}</div>`;
 
-function employeeFields(d, rateLocked) {
-  return `${H('1. Employee details')}
+function employeeFields(d, rateLocked, P = {}) {
+  return `${photoBlock(P, 'the employee')}${H('1. Employee details')}
     <div class="grid2">${F('Full name', 'full_name', d.full_name, 'required')}${F('ID / passport no.', 'id_no', d.id_no)}</div>
     <div class="grid3">${F('Nationality', 'nationality', d.nationality ?? 'Liswati')}${F('Date of birth', 'dob', d.dob, 'type="date"')}${SEL('Gender', 'gender', ['', 'Male', 'Female'], d.gender)}</div>
     ${F('Physical address', 'address', d.address)}
@@ -96,7 +101,11 @@ function employeeFields(d, rateLocked) {
     ${H('2. Payment & banking')}
     <div class="grid2">${F('Bank', 'bank', d.bank)}${F('Account holder', 'acc_holder', d.acc_holder)}</div>
     <div class="grid3">${F('Account no.', 'acc_no', d.acc_no, 'inputmode="numeric"')}${F('Branch code', 'branch', d.branch, 'inputmode="numeric"')}${SEL('Account type', 'acc_type', ['', 'Cheque', 'Savings'], d.acc_type)}</div>
-    ${F('EWallet number (only if no bank account)', 'ewallet', d.ewallet, 'inputmode="tel"')}
+    ${SEL('Wages paid to', 'pay_method', [['bank', 'Bank account'], ['ewallet', 'EWallet / mobile money (phone number)']], d.pay_method || (d.ewallet ? 'ewallet' : 'bank'))}
+    <div class="dims" data-ew><b style="font-family:var(--display)">EWallet payment number</b>
+      <div class="grid3">${SEL('EWallet', 'ewallet_network', WALLETS, d.ewallet_network || 'FNB eWallet')}${F('EWallet phone number', 'ewallet', d.ewallet, 'type="tel" inputmode="tel" placeholder="e.g. 7612 3456"')}${F('Type the number again', 'ewallet2', d.ewallet2 ?? d.ewallet, 'type="tel" inputmode="tel"')}</div>
+      <div class="note warn" style="margin:6px 0"><b>⚠ Warning:</b> ${esc(EWALLET_WARNING)}</div>
+      <label class="chk"><input type="checkbox" name="ew_ack" ${d.ew_ack ? 'checked' : ''}> The employee has checked that this number is correct, registered in their name and active.</label></div>
     ${H('3. Project & role')}
     <div class="grid2">${F('Project / site', 'project_name', d.project_name)}${F('Site location', 'site', d.site)}</div>
     <div class="grid3">${F('Start date', 'start_date', d.start_date, 'type="date"')}${F('End date', 'end_date', d.end_date, 'type="date"')}${F('Supervisor / foreman', 'supervisor', d.supervisor)}</div>
@@ -111,9 +120,9 @@ function employeeFields(d, rateLocked) {
     ${F('Meal / rest break', 'break', d.break ?? '30 minutes unpaid')}`;
 }
 
-function subFields(d, areas, canRates) {
+function subFields(d, areas, canRates, P = {}) {
   const lines = d.lines?.length ? d.lines : [{ description: '', unit: 'm²', qty: '', rate: '' }];
-  return `${H('Subcontractor')}
+  return `${photoBlock(P, 'the contact person')}${H('Subcontractor')}
     <div class="grid2">${F('Company / trading name', 'company', d.company, 'required')}${F('Contact person (signs)', 'contact', d.contact)}</div>
     <div class="grid3">${F('Company reg. or ID no.', 'reg_no', d.reg_no)}${F('VAT no. (if registered)', 'vat_no', d.vat_no)}${F('Phone', 'phone', d.phone, 'type="tel"')}</div>
     <div class="grid2">${F('Email', 'email', d.email, 'type="email"')}${F('Address', 'address', d.address)}</div>
@@ -159,18 +168,21 @@ export async function startContract(ctx, { person, project = null, type = null, 
   };
   if (!d.conditions) d.conditions = subTerms;
   if (!canRates && type !== 'subcontract' && person.rate != null) { if (person.pay_basis === 'month') { d.pay_basis = 'month'; d.monthly_rate = person.rate; } else if (!person.pay_basis || person.pay_basis === 'day') { d.pay_basis = 'day'; d.daily_rate = person.rate; } }
-  let idPhoto = existing?.id_photo || null, filePath = existing?.file_path || null;
+  let filePath = existing?.file_path || null;
+  const ph = { idf: existing?.id_photo || null, idb: existing?.id_photo_back || null, me: existing?.person_photo || person.photo || null };
+  const P = await photoUrls(store, Object.values(ph)); const purl = { idf: P[ph.idf], idb: P[ph.idb], me: P[ph.me] };
+  let idPhoto = ph.idf;
   const rateLocked = !canRates; // only Procurement, the QS and Matt set pay
 
   while (true) {
     const body = w => `<div class="row" style="gap:10px;align-items:flex-end">${SEL('Contract type', 'ctype', Object.entries(CONTRACT_TYPES).filter(([k, t]) => t.kinds.includes(kind) || k === existing?.type).map(([k, t]) => [k, t.label]), type)}
         <span class="small muted grow" style="padding-bottom:10px">For <b>${esc(person.name)}</b> · ${esc(PERSON_KINDS[kind] || kind)}${project ? ' · ' + esc(project.name) : ''}</span></div>
       <div id="cf">${formFor(type)}</div>`;
-    const formFor = t => t === 'subcontract' ? subFields(d, areas, canRates)
+    const formFor = t => t === 'subcontract' ? subFields(d, areas, canRates, purl)
       : t === 'upload' ? `<p class="muted">Use this for permanent, probation and offer-of-employment contracts signed on paper. Photograph or scan the signed copy.</p>
           <div class="grid3">${F('Contract title', 'title', d.title || 'Contract of employment')}${F('Start date', 'start_date', d.start_date, 'type="date"')}${F('End date (blank if permanent)', 'end_date', d.end_date, 'type="date"')}</div>
           <div class="row"><label class="btn small">${filePath ? 'Replace signed copy' : 'Attach signed copy'}<input type="file" accept="image/*,application/pdf" capture="environment" id="up" hidden></label><span class="small muted" id="upm">${filePath ? 'Signed copy attached' : ''}</span></div>`
-      : employeeFields(d, rateLocked);
+      : employeeFields(d, rateLocked, purl);
     const v = await dialog({
       title: existing ? `Contract ${existing.number}` : 'New contract', wide: true, sticky: true, body: body(),
       onOpen: w => {
@@ -185,6 +197,8 @@ export async function startContract(ctx, { person, project = null, type = null, 
             h.textContent = s ? `Worked out: ${money(s)}${b === 'day_rate' ? ' (estimate)' : ''}` : '';
             if (s && !w.querySelector('[name=contract_sum]').dataset.touched) w.querySelector('[name=contract_sum]').value = s.toFixed(2);
           };
+          for (const k of ['idf', 'idb', 'me']) wirePhoto(w, 'ph-' + k, store, 'hr', p => { ph[k] = p.path; purl[k] = p.url; if (k === 'idf') idPhoto = p.path; w.querySelector('#pv-' + k).innerHTML = thumb(p.url, k, 84); });
+          const pm = w.querySelector('[name=pay_method]'), ew = w.querySelector('[data-ew]'); if (pm && ew) { const s = () => { ew.hidden = pm.value !== 'ewallet'; }; pm.onchange = s; s(); }
           w.querySelector('[name=contract_sum]')?.addEventListener('input', e => e.target.dataset.touched = 1);
           w.querySelector('[name=basis]') && (w.querySelector('[name=basis]').onchange = sb);
           cf.addEventListener('input', hint);
@@ -198,13 +212,14 @@ export async function startContract(ctx, { person, project = null, type = null, 
       buttons: [...(existing && existing.status !== 'signed' ? [{ label: 'Delete', danger: true, value: 'delete' }] : []), { label: 'Cancel', value: null },
         ...(type === 'upload' ? [] : [{ label: 'Save draft', value: w => ({ act: 'draft', data: type === 'subcontract' ? readSub(w) : formData(w.querySelector('#cf')) }) }]),
         { label: type === 'upload' ? 'Save' : 'Next: read & sign', primary: true, value: w => ({ act: 'next', data: type === 'subcontract' ? readSub(w) : formData(w.querySelector('#cf')), type: w.querySelector('[name=ctype]').value }),
-          validate: w => { const n = w.querySelector('[name=full_name],[name=company]'); if (n && !n.value.trim()) { toast('Enter the name first'); return false; } if (w.querySelector('[name=ctype]').value === 'upload' && !filePath) { toast('Attach the signed copy'); return false; } return true; } }],
+          validate: w => { const n = w.querySelector('[name=full_name],[name=company]'); if (n && !n.value.trim()) { toast('Enter the name first'); return false; }
+            const pm = w.querySelector('[name=pay_method]'); if (pm && pm.value === 'ewallet') { const a = w.querySelector('[name=ewallet]').value.replace(/\D/g, ''), b = w.querySelector('[name=ewallet2]').value.replace(/\D/g, ''); if (a.length < 8) { toast('Enter the full EWallet phone number'); return false; } if (a !== b) { toast('The two EWallet numbers do not match – check with the employee'); return false; } if (!w.querySelector('[name=ew_ack]').checked) { toast('Tick that the employee has checked the EWallet number'); return false; } } if (w.querySelector('[name=ctype]').value === 'upload' && !filePath) { toast('Attach the signed copy'); return false; } return true; } }],
     });
     if (!v) return null;
     if (v === 'delete') { if (await confirmDlg('Delete this draft contract?', existing.number)) { await store.remove('contracts', existing.id); return 'deleted'; } continue; }
     d = { ...d, ...v.data }; if (v.type) type = v.type;
     if (type === 'subcontract') d.area_names = areas.filter(a => (d.area_ids || []).includes(a.id)).map(a => `${a.code || ''} ${a.name || ''}`.trim()).join(', ');
-    const row = { person_id: person.id, project_id: type === 'casual_short' || type === 'upload' ? (project?.id || null) : project?.id || null, type, start_date: d.start_date || null, end_date: d.end_date || null, data: d, file_path: filePath, id_photo: idPhoto };
+    const row = { person_id: person.id, project_id: type === 'casual_short' || type === 'upload' ? (project?.id || null) : project?.id || null, type, start_date: d.start_date || null, end_date: d.end_date || null, data: d, file_path: filePath, id_photo: ph.idf, id_photo_back: ph.idb, person_photo: ph.me };
     if (v.act === 'draft') { const c = await saveContract(store, existing, { ...row, status: 'draft' }); toast('Draft saved'); return c; }
     if (type === 'upload') { const c = await saveContract(store, existing, { ...row, status: 'signed', signed_at: new Date().toISOString() }); await syncPerson(store, person, type, d); toast('Contract recorded'); return c; }
 
@@ -216,9 +231,8 @@ export async function startContract(ctx, { person, project = null, type = null, 
       body: `<div class="cdoc">${contractHtml(draft, person, project)}</div>
         <div class="dims" style="margin-top:10px">
           <div class="grid2">${F('Signing for Du Green (name)', 'co_name', d.co_name || ctx.me?.full_name || d.supervisor || '')}${F('Designation', 'co_role', d.co_role || (ctx.me?.role === 'supervisor' ? 'Site Supervisor' : ''))}</div>
-          <div class="grid2">${F('Witness name (optional)', 'witness', d.witness)}<div class="row" style="align-self:end">${type === 'subcontract' ? '' : `<label class="btn small">${idPhoto ? 'Retake ID photo' : 'Photograph ID / passport'}<input type="file" accept="image/*" capture="environment" id="idp" hidden></label>`}<span class="small muted" id="idm">${idPhoto ? 'ID photo saved' : ''}</span></div></div>
+          <div class="grid2">${F('Witness name (optional)', 'witness', d.witness)}<div class="small ${ph.idf || type === 'subcontract' ? 'muted' : 'flag'}" style="align-self:end;padding-bottom:10px">${ph.idf ? '✓ ID photo taken' : type === 'subcontract' ? '' : 'No ID photo yet – go Back to take it. Pay can’t be processed without it.'}${ph.me ? ' · ✓ photo of person' : ''}</div></div>
           <label class="chk"><input type="checkbox" id="ack"> I have read and explained this contract to ${esc(who)} in a language they understand, and they had the chance to ask questions.</label></div>`,
-      onOpen: w => { w.querySelector('#idp') && (w.querySelector('#idp').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const path = `hr/id-${uid()}.jpg`; await store.upload('photos', path, f); idPhoto = path; w.querySelector('#idm').textContent = 'ID photo saved'; } catch (err) { toast(err.message); } }); },
       buttons: [{ label: 'Back', value: 'back' }, { label: 'Signatures', primary: true, value: w => ({ co_name: w.querySelector('[name=co_name]').value, co_role: w.querySelector('[name=co_role]').value, witness: w.querySelector('[name=witness]').value }), validate: w => { if (!w.querySelector('#ack').checked) { toast('Tick the box once the contract has been explained'); return false; } return true; } }],
     });
     if (pv === 'back') continue;
@@ -230,8 +244,8 @@ export async function startContract(ctx, { person, project = null, type = null, 
     if (!coSign) { toast('Du Green did not sign. Saved as a draft.'); return await saveContract(store, existing, { ...row, data: d, id_photo: idPhoto, status: 'draft' }); }
     const witnessSign = d.witness ? await captureSignature('Witness signature', d.witness) : null;
     const c = await saveContract(store, existing, { ...row, data: d, id_photo: idPhoto, status: 'signed', signed_at: new Date().toISOString(), worker_sign: workerSign, company_sign: coSign, witness_sign: witnessSign });
-    await syncPerson(store, person, type, d);
-    toast(type !== 'subcontract' && !idPhoto ? 'Contract signed. ID copy still needed before pay.' : 'Contract signed');
+    await syncPerson(store, person, type, d, ph);
+    toast(type !== 'subcontract' && !ph.idf ? 'Contract signed. ID copy still needed before pay.' : 'Contract signed');
     return c;
   }
 }
@@ -252,8 +266,11 @@ async function saveContract(store, existing, row) {
 }
 
 // Keep the register in step with what was captured on the contract.
-async function syncPerson(store, person, type, d) {
+async function syncPerson(store, person, type, d, ph = {}) {
   const patch = {};
+  if (ph.me) patch.photo = ph.me;
+  if (type !== 'subcontract') Object.assign(patch, { pay_method: d.pay_method || 'bank', ewallet_network: d.pay_method === 'ewallet' ? d.ewallet_network : null, ewallet_no: d.pay_method === 'ewallet' ? d.ewallet : null, bank: d.bank || null, acc_no: d.acc_no || null, branch: d.branch || null, acc_holder: d.acc_holder || null });
+  else Object.assign(patch, { bank: d.bank || null, acc_no: d.acc_no || null, branch: d.branch || null, acc_holder: d.acc_holder || null });
   if (type === 'subcontract') { if (d.company) patch.company = d.company; if (d.phone) patch.phone = d.phone; if (d.email) patch.email = d.email; if (d.reg_no) patch.id_no = d.reg_no; }
   else { if (d.id_no) patch.id_no = d.id_no; if (d.phone) patch.phone = d.phone; if (d.address) patch.address = d.address; if (d.role && !person.role) patch.role = d.role; }
   if (Object.keys(patch).length) await store.update('staff', person.id, patch);
@@ -274,14 +291,16 @@ export function contractHtml(c, person, project) {
     sec(t === 'casual_full' ? 'SECTION 1 — EMPLOYEE PERSONAL DETAILS' : '1. EMPLOYEE DETAILS'),
     kv([[['Full name', d.full_name], ['ID / passport no.', d.id_no]], [['Nationality', d.nationality], ['Date of birth', d.dob ? fmtDate(d.dob) : '']], [['Gender', d.gender], ['Cell / phone', d.phone]], [['Physical address', d.address], ['Emergency contact', [d.em_name, d.em_rel, d.em_phone].filter(Boolean).join(' · ')]]]),
     sec(t === 'casual_full' ? 'SECTION 2 — PAYMENT & BANKING DETAILS' : '3. PAYMENT & BANKING DETAILS'),
-    kv([[['Bank', d.bank], ['Account type', d.acc_type]], [['Account holder', d.acc_holder], ['Account no.', d.acc_no]], [['Branch code', d.branch], ['EWallet (if no bank account)', d.ewallet]]]),
+    kv([[['Wages paid to', d.pay_method === 'ewallet' ? 'EWallet / mobile money' : 'Bank account'], ['', '']], [['Bank', d.bank], ['Account type', d.acc_type]], [['Account holder', d.acc_holder], ['Account no.', d.acc_no]], [['Branch code', d.branch], ['EWallet', d.pay_method === 'ewallet' ? `${d.ewallet_network || ''} ${d.ewallet || ''}`.trim() : d.ewallet]]]),
+    `<p class="note-b"><b>⚠ EWALLET WARNING:</b> ${esc(EWALLET_WARNING)}${d.pay_method === 'ewallet' && d.ew_ack ? ' The employee confirmed the number above is correct and active.' : ''}</p>`,
     '<p class="sm">The Company is NOT liable for payments sent to an incorrect EWallet or bank account number supplied by the Employee. Incorrect payment details are the Employee\'s sole responsibility.</p>',
     sec(t === 'casual_full' ? 'SECTION 3 — PROJECT, CONTRACT DETAILS & ROLE' : '2. PROJECT & SITE DETAILS'),
     kv([[['Project / site', d.project_name], ['Site location', d.site]], [['Start date', d.start_date ? fmtDate(d.start_date) : ''], ['End date', d.end_date ? fmtDate(d.end_date) : '']], [['Supervisor / foreman', d.supervisor], ['Role / classification', d.role]], [['Duties', d.duties], ['', '']]]),
   ];
   const pay = kv([[['Payment basis', d.pay_basis === 'month' ? 'Monthly' : 'Daily'], [d.pay_basis === 'month' ? 'Monthly rate' : 'Daily rate (Mon–Fri)', d.pay_basis === 'month' ? rateTxt(d.monthly_rate) : rateTxt(d.daily_rate)]], [['Saturday', d.sat_rate ? rateTxt(d.sat_rate) : 'As per the Regulation of Wages Order'], ['Sunday / public holiday', [d.sun_rate && rateTxt(d.sun_rate), d.ph_rate && rateTxt(d.ph_rate)].filter(Boolean).join(' / ') || 'As per the Regulation of Wages Order']]]);
   const hours = kv([[['Weekdays', `${d.wk_start || ''} – ${d.wk_end || ''} · ${d.wk_days || ''}`], ['Saturday', `${d.sat_type || ''}${d.sat_type !== 'Not applicable' ? ` · ${d.sat_start || ''} – ${d.sat_end || ''}` : ''}`]], [['Meal / rest break', d.break], ['', '']]]);
-  if (t !== 'casual_full') details.push(...details.splice(2, 3)); // short form order: employee, project, banking
+  // details = [emp hdr, emp, bank hdr, bank, ewallet warning, liability note, project hdr, project]
+  if (t !== 'casual_full') details.splice(0, details.length, details[0], details[1], details[6], details[7], details[2], details[3], details[4], details[5]); // short form: employee, project, banking
   let body = '';
   if (t === 'casual_full') {
     body = T.intro.map(p => `<p>${esc(p)}</p>`).join('') + details.join('');
@@ -296,7 +315,7 @@ export function contractHtml(c, person, project) {
     body = T.intro.map(p => `<p>${esc(p)}</p>`).join('') + details.join('') + `<p class="sm">${esc(T.notes[0] || '')}</p>`
       + sec('4. REMUNERATION — RATES & WORKING HOURS') + pay + hours + `<p class="sm">${esc(T.notes[1] || '')}</p>` + sec('5. KEY TERMS & CONDITIONS');
     for (const b of T.clauses) body += b.h2 ? `<h4>${esc(b.h2)}</h4>` : b.p && /^\d+\.\d+\.\d+/.test(b.p) ? `<p>${esc(b.p)}</p>` : b.p ? `<h4>${esc(b.p)}</h4>` : b.note ? `<p class="note-b">${esc(b.note)}</p>` : '';
-    body += (T.ack || []).map(a => `<p class="note-b">${esc(a)}</p>`).join('');
+    if (!T.clauses.some(b => b.note && /ACKNOWLEDGEMENT/.test(b.note))) body += (T.ack || []).map(a => `<p class="note-b">${esc(a)}</p>`).join('');
   }
   return `<h2 class="ct">${esc(T.title)}</h2><div class="cst">${esc(T.subtitle)}</div><div class="cno">Contract no. ${esc(c.number || '')}</div>${body}${sigBlock(c, d, 'FOR THE EMPLOYER', 'FOR THE EMPLOYEE', d.full_name, `ID No: ${d.id_no || ''}`)}`;
 }
@@ -329,26 +348,33 @@ const DOC_CSS = `<style>.ct{font-size:17px;margin:6px 0 2px;text-align:center}.c
   .note-b{border:1px solid #ccc;padding:6px 8px;font-size:11.5px}table.kv td{font-size:12px;padding:4px 6px;border:1px solid #ddd}table.kv td.k{background:#f6f6f6;width:18%;font-weight:bold}
   .terms{font-size:11.5px;line-height:1.45}table.sigs{margin-top:18px}table.sigs td{width:50%;border:0;padding:8px 10px 14px 0;font-size:12px}.ln{border-top:1px solid #333;padding-top:3px}</style>`;
 
-export function openContractDoc(c, person, project) {
+export async function openContractDoc(c, person, project, store = null) {
+  const U = store ? await photoUrls(store, [c.id_photo, c.id_photo_back, c.person_photo]) : {};
+  let ppe = [];
+  if (store && (c.type === 'casual_short' || c.type === 'casual_full')) { try { const St = await import('./stores.js'); const S = await St.loadStores(store); ppe = S.moves.filter(m => m.to_loc === 'person:' + c.person_id && m.type === 'receive_site' && S.itemBy[m.item_id]?.kind === 'ppe').map(m => ({ name: S.itemBy[m.item_id]?.name || '', date: m.move_date, value: S.itemBy[m.item_id]?.unit_cost, qty: m.qty, tag: S.assetBy[m.asset_id]?.tag_no })); } catch (e) { } }
+  const ids = [[c.person_photo, 'Photo of ' + (c.type === 'subcontract' ? 'contact person' : 'employee')], [c.id_photo, 'ID / passport – front'], [c.id_photo_back, 'ID – back']].filter(([p]) => p && U[p]);
   open(`${head(CONTRACT_TYPES[c.type]?.label || 'Contract', `<div style="font-size:13px">${esc(person?.name || '')}${project ? ' · ' + esc(project.name) : ''}</div>`)}${DOC_CSS}${contractHtml(c, person, project)}
+    ${ids.length ? `<div style="page-break-before:always"></div><h3 class="sec">ANNEXURE — IDENTIFICATION</h3><div style="display:flex;gap:14px;flex-wrap:wrap">${ids.map(([p, l]) => `<figure style="margin:0"><img src="${U[p]}" alt="${esc(l)}" style="max-width:320px;max-height:240px;border:1px solid #ccc"><figcaption style="font-size:11px">${esc(l)}</figcaption></figure>`).join('')}</div>` : ''}
     ${c.type === 'casual_short' || c.type === 'casual_full' ? `<div style="page-break-before:always"></div><h3 class="sec">ANNEXURE — PPE ISSUE LOG</h3><p class="sm">Completed each time PPE is issued — the employee signs per item at the time of issue.</p>
       <table><thead><tr><th>#</th><th>PPE item</th><th>Date issued</th><th>Value (E)</th><th>Employee signature</th><th>Issuing officer</th><th>Date returned</th><th>Condition</th></tr></thead><tbody>
-      ${['Safety helmet / hard hat', 'Hi-vis vest', 'Safety boots', 'Work gloves', 'Protective eyewear', 'Dust mask / respirator', 'Ear protection', 'Reflective jacket', 'Overalls / work suit', 'Safety harness', '', '', ''].map((x, i) => `<tr><td>${i + 1}</td><td style="height:24px">${x}</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')}</tbody></table>` : ''}`, c.number || 'Contract');
+      ${ppe.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.name)}${x.tag ? ' ' + esc(x.tag) : ''}${x.qty > 1 ? ' × ' + fmt(x.qty) : ''}</td><td>${fmtDate(x.date)}</td><td>${x.value != null ? fmt(x.value * (x.qty || 1), 2) : ''}</td><td>(signed in app)</td><td>Central Stores</td><td></td><td></td></tr>`).join('')}
+      ${(ppe.length ? ['', '', '', '', ''] : ['Safety helmet / hard hat', 'Hi-vis vest', 'Safety boots', 'Work gloves', 'Protective eyewear', 'Dust mask / respirator', 'Ear protection', 'Reflective jacket', 'Overalls / work suit', 'Safety harness', '', '', '']).map((x, i) => `<tr><td>${ppe.length + i + 1}</td><td style="height:24px">${x}</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')}</tbody></table>` : ''}`, c.number || 'Contract');
 }
 
 // View one contract in the app (with print / continue signing).
 export async function viewContract(ctx, c, person, project) {
   const st = contractState(c);
-  let idUrl = null; if (c.id_photo) try { idUrl = await ctx.store.fileUrl('photos', c.id_photo); } catch (e) { }
+  const U = await photoUrls(ctx.store, [c.id_photo, c.id_photo_back, c.person_photo]); const idUrl = U[c.id_photo];
   let fileUrl = null; if (c.file_path) try { fileUrl = await ctx.store.fileUrl('photos', c.file_path); } catch (e) { }
   const v = await dialog({
     title: `${c.number} · ${CONTRACT_TYPES[c.type]?.short || ''}`, wide: true,
     body: `<div class="row">${st === 'signed' ? '<span class="pill ok">Signed</span>' : st === 'expired' ? '<span class="pill bad">Expired</span>' : st === 'void' ? '<span class="pill mute">Cancelled</span>' : '<span class="pill warn">Draft – not signed</span>'}
         ${c.signed_at ? `<span class="small muted">Signed ${new Date(c.signed_at).toLocaleString('en-GB')}</span>` : ''}${fileUrl ? `<a class="btn small" href="${fileUrl}" target="_blank" rel="noopener">Open signed copy</a>` : ''}${idUrl ? `<a class="btn small" href="${idUrl}" target="_blank" rel="noopener">ID copy</a>` : (c.type === 'casual_short' || c.type === 'casual_full') && st === 'signed' ? '<span class="pill warn">ID copy outstanding</span>' : ''}</div>
+      <div class="row" style="gap:8px;margin:8px 0">${[[c.person_photo, 'Person'], [c.id_photo, 'ID front'], [c.id_photo_back, 'ID back']].filter(([p]) => U[p]).map(([p, l]) => `<a href="${U[p]}" target="_blank" rel="noopener" title="${l}">${thumb(U[p], l, 72)}</a>`).join('')}</div>
       <div class="cdoc">${contractHtml(c, person, project)}</div>`,
     buttons: [...(st === 'signed' && canSetRates(ctx.me) ? [{ label: 'Cancel contract', danger: true, value: 'void' }] : []), { label: 'Print / PDF', value: 'print' }, ...(st === 'draft' ? [{ label: 'Continue & sign', primary: true, value: 'sign' }] : [{ label: 'Close', primary: true, value: null }])],
   });
-  if (v === 'print') openContractDoc(c, person, project);
+  if (v === 'print') openContractDoc(c, person, project, ctx.store);
   if (v === 'sign') return await startContract(ctx, { person, project, contract: c });
   if (v === 'void' && await confirmDlg('Cancel this contract?', 'It stays on record but no longer counts as a contract in place.', 'Cancel contract')) { await ctx.store.update('contracts', c.id, { status: 'void' }); toast('Contract cancelled'); return 'void'; }
   return null;

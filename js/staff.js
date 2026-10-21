@@ -2,6 +2,8 @@
 // the rates sheet kept by Procurement and the QS/Ops manager, contracts, and transport-rate defaults.
 import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, VEHICLES, PERSON_KINDS, PAY_BASIS, WORKDAYS_PER_MONTH, canSetRates, copyText, downloadFile, csvCell } from './util.js';
 import { getSetting, setSetting } from './store.js';
+import { wagesView } from './wages.js';
+import { photoUrls, thumb } from './photos.js';
 import { CONTRACT_TYPES, contractFor, contractBadge, startContract, viewContract, contractState, DEFAULT_SUB_TERMS } from './contracts.js';
 
 export const STAFF_ROLES = ['Site Supervisor', 'Team leader', 'General worker', 'Horticulturist', 'Irrigation tech', 'Driver', 'Plant operator', 'Casual', 'Other'];
@@ -74,13 +76,14 @@ export async function render(app, ctx, rest = []) {
     <div class="page-head"><div><div class="eyebrow">People on site</div><h1>People & subcontractors</h1>
       <p class="small muted" style="margin:4px 0 0">Supervisors book people onto the daily jobcard and get contracts signed on site. Procurement and the QS keep the rates.</p></div>
       <div class="row"><button class="btn" id="addsub">+ Subcontractor</button><button class="btn primary" id="add">+ Person</button></div></div>
-    <nav class="subtabs"><a href="#/people" class="${tab === 'register' ? 'on' : ''}">Register</a><a href="#/people/rates" class="${tab === 'rates' ? 'on' : ''}">Rates sheet</a><a href="#/people/contracts" class="${tab === 'contracts' ? 'on' : ''}">Contracts</a></nav>
+    <nav class="subtabs"><a href="#/people" class="${tab === 'register' ? 'on' : ''}">Register</a><a href="#/people/rates" class="${tab === 'rates' ? 'on' : ''}">Rates sheet</a><a href="#/people/contracts" class="${tab === 'contracts' ? 'on' : ''}">Contracts</a><a href="#/people/wages" class="${tab === 'wages' ? 'on' : ''}">Wage tickets</a></nav>
     <div id="pv"></div></div>`;
   app.querySelector('#add').onclick = async () => { if (await editStaff(store, null, { me })) ctx.reload(); };
   app.querySelector('#addsub').onclick = async () => { if (await editStaff(store, null, { me, kind: 'subcontractor' })) ctx.reload(); };
   const el = app.querySelector('#pv');
   if (tab === 'rates') return ratesView(el, ctx, P, rates);
   if (tab === 'contracts') return contractsView(el, ctx, P);
+  if (tab === 'wages') return wagesView(el, ctx, P, payPeriod);
   return registerView(el, ctx, P);
 }
 
@@ -107,11 +110,15 @@ export async function personCard(ctx, p, P, project = null) {
   const { store, me } = ctx;
   const mine = P.contracts.filter(c => c.person_id === p.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   const s = P.seen?.[p.id];
+  const U = await photoUrls(store, [p.photo]);
+  let held = []; try { const St = await import('./stores.js'); held = St.personItems(await St.loadStores(store), p.id); } catch (e) { }
   const v = await dialog({
     title: p.name, wide: true,
-    body: `<div class="row"><span class="pill info">${esc(PERSON_KINDS[p.kind || 'staff'])}</span><span>${esc(p.role || '')}</span>${p.phone ? `<a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>` : ''}<span class="grow"></span>${contractBadge(contractFor(p.id, P.contracts, project?.id))}</div>
+    body: `<div class="row">${thumb(U[p.photo], p.name, 64)}<span class="pill info">${esc(PERSON_KINDS[p.kind || 'staff'])}</span><span>${esc(p.role || '')}</span>${p.phone ? `<a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>` : ''}<span class="grow"></span>${contractBadge(contractFor(p.id, P.contracts, project?.id))}</div>
       ${canSetRates(me) ? `<p class="small">Rate: <b>${p.rate != null ? money(Number(p.rate)) : 'not set'}</b> ${esc(PAY_BASIS[basisOf(p)] || '')}${p.rate_updated_by ? ` <span class="muted">· set by ${esc(p.rate_updated_by)} ${fmtDate(p.rate_updated_at)}</span>` : ''}</p>` : ''}
       ${s ? `<p class="small muted">${fmt(s.days, 1)} ${p.kind === 'subcontractor' ? 'person-' : ''}days on site · last ${fmtDate(s.last)}</p>` : ''}
+      ${p.pay_method ? `<p class="small">Wages paid to: <b>${p.pay_method === 'ewallet' ? `EWallet ${esc(p.ewallet_network || '')} ${esc(p.ewallet_no || '')}` : esc([p.bank, p.acc_no].filter(Boolean).join(' '))}</b></p>` : ''}
+      ${held.length ? `<p class="small">Holding from stores: ${held.map(h => `${esc(h.item.name)}${h.qty ? ' × ' + fmt(h.qty) : ''}${h.assets.length ? ' ' + h.assets.map(a => esc(a.tag_no)).join(', ') : ''}`).join(' · ')}</p>` : ''}
       <h3 style="margin:12px 0 4px;font-size:15px">Contracts</h3>
       ${mine.length ? `<div class="tbl"><table><thead><tr><th>No.</th><th>Type</th><th>Project</th><th>Dates</th><th>Status</th></tr></thead><tbody>${mine.map(c => { const st = contractState(c); return `<tr class="click" data-c="${c.id}"><td><b>${esc(c.number)}</b></td><td class="small">${esc(CONTRACT_TYPES[c.type]?.short || c.type)}</td><td class="small">${esc(P.projBy?.[c.project_id]?.name || 'All projects')}</td><td class="small">${c.start_date ? fmtDate(c.start_date) : ''}${c.end_date ? ' – ' + fmtDate(c.end_date) : ''}</td>
         <td>${st === 'signed' ? '<span class="pill ok">Signed</span>' : st === 'expired' ? '<span class="pill bad">Expired</span>' : st === 'void' ? '<span class="pill mute">Cancelled</span>' : '<span class="pill warn">Draft</span>'}</td></tr>`; }).join('')}</tbody></table></div>` : '<p class="muted small">No contract yet.</p>'}`,

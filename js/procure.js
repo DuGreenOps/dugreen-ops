@@ -1,6 +1,7 @@
 // Procurement: price items from the supplier library, create RFQs, capture supplier quotes
 // (upload + Claude reads them, or type them in), compare suppliers, select, and raise purchase orders.
-import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, itemKey, today, fmtDate, UNITS, CATEGORIES, groupBy, uid } from './util.js';
+import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, itemKey, today, fmtDate, UNITS, CATEGORIES, groupBy, uid, approvalCheck, DEFAULT_LIMITS } from './util.js';
+import { getSetting } from './store.js';
 import { procurementItems } from './spec.js';
 import { sortAreas } from './areas.js';
 import { editSupplier } from './library.js';
@@ -25,7 +26,8 @@ export async function loadProcurement(store, project) {
   const quoteById = Object.fromEntries(quotes.map(q => [q.id, q]));
   const selBy = Object.fromEntries(sels.map(s => [s.item_key, s]));
   const onPo = new Set(poLines.map(l => l.item_key));
-  return { areas, spec, items, rfqs, rfqLines, quotes, quoteLines, quoteById, sels, selBy, pos, poLines, onPo, suppliers, sup, lib };
+  const limits = await getSetting(store, 'approval_limits', null) || DEFAULT_LIMITS;
+  return { limits, areas, spec, items, rfqs, rfqLines, quotes, quoteLines, quoteById, sels, selBy, pos, poLines, onPo, suppliers, sup, lib };
 }
 
 // All prices known for one item: this project's quotes + latest library price per supplier.
@@ -376,12 +378,8 @@ async function generatePOs(ctx) {
     buttons: [{ label: 'Cancel', value: false }, { label: 'Create POs', primary: true, value: true }],
   });
   if (!ok) return;
-  const all = await store.list('purchase_orders', {}, null);
-  let n = all.length;
-  const yr = new Date().getFullYear();
   for (const [s, its] of Object.entries(bySup)) {
-    n++;
-    const po = await store.insert('purchase_orders', { project_id: project.id, supplier_id: s, number: `DG-PO-${yr}-${String(n).padStart(3, '0')}`, status: 'draft', po_date: today(), delivery: project.site_address || project.name, vat_rate: project.vat_rate ?? 0.15 });
+    const po = await store.insert('purchase_orders', { project_id: project.id, supplier_id: s, number: await nextPoNumber(store), status: 'draft', po_date: today(), delivery: project.site_address || project.name, vat_rate: project.vat_rate ?? 0.15 });
     await store.insert('po_lines', its.map((i, k) => ({ po_id: po.id, item_key: i.item_key, description: i.description, spec: i.spec, unit: i.unit, qty: +i.qty.toFixed(2), unit_price: Number(D.selBy[i.item_key].unit_price), sort: k })));
   }
   toast('Purchase orders created');
@@ -411,7 +409,7 @@ function poDetail(el, ctx, D, poId) {
   const vat = Number(po.vat_rate ?? 0.15);
   const sub = lines.reduce((t, l) => t + Number(l.qty) * Number(l.unit_price), 0);
   el.innerHTML = `<section class="card"><div class="hd"><div class="grow"><div class="small muted"><a href="#/p/${project.id}/procure/pos">Purchase orders</a> /</div><h3>${esc(po.number)} · ${esc(s.name || '')}</h3></div>
-      ${statusPill(po.status)}${poActions(po, ctx.me)}
+      ${statusPill(po.status)}${po.hire ? '<span class="pill info">Plant hire</span>' : ''}${poActions(po, ctx.me, approvalCheck(ctx.me, sub * (1 + vat), D.limits))}
       <button class="btn" id="doc">Document / PDF</button>${s.email ? `<a class="btn" href="mailto:${esc(s.email)}?subject=${encodeURIComponent('Purchase order ' + po.number + ' – ' + project.name)}&body=${encodeURIComponent(`Dear ${s.contact || s.name},\n\nPlease find our purchase order ${po.number} for ${project.name} attached.\n\nKind regards,\nDu Green Procurement`)}">Email</a>` : ''}
       <button class="btn danger" id="del">Delete</button></div>
     <div class="bd grid2"><label class="f">Deliver to<input id="dl" value="${esc(po.delivery || '')}"></label><label class="f">Notes<input id="nt" value="${esc(po.notes || '')}"></label></div>
@@ -429,13 +427,22 @@ function poDetail(el, ctx, D, poId) {
   el.querySelectorAll('[data-l]').forEach(i => i.onchange = async () => { await store.update('po_lines', i.dataset.l, { [i.dataset.f]: num(i.value) ?? 0 }); ctx.reload(); });
 }
 
+// Next free PO number for this year: DG-PO-YYYY-NNN
+export async function nextPoNumber(store) {
+  const yr = new Date().getFullYear(), pre = `DG-PO-${yr}-`;
+  const all = await store.list('purchase_orders', {}, null);
+  const n = all.map(p => String(p.number || '')).filter(s => s.startsWith(pre)).map(s => parseInt(s.slice(pre.length), 10) || 0).reduce((a, b) => Math.max(a, b), 0);
+  return pre + String(n + 1).padStart(3, '0');
+}
+
 // ---- PO approval flow: draft → awaiting approval → approved → issued → delivered
-export function poActions(po, me) {
-  const admin = me?.role === 'admin';
+// `check` = approvalCheck(me, value incl. VAT, limits): Matt any value; Ops / Procurement within their limit.
+export function poActions(po, me, check = { ok: me?.role === 'admin' }) {
+  const admin = !!check.ok;
   const b = (act, label, cls = '') => `<button class="btn ${cls}" data-act="${act}">${label}</button>`;
   switch (po.status) {
     case 'draft': case 'rejected': return b('submit', 'Submit for approval', 'primary') + (admin ? b('approve', 'Approve now') : '');
-    case 'pending': return admin ? b('approve', 'Approve', 'primary') + b('reject', 'Reject', 'danger') : '<span class="small muted">Waiting for Matt to approve</span>';
+    case 'pending': return admin ? b('approve', 'Approve', 'primary') + b('reject', 'Reject', 'danger') : `<span class="small muted">${esc(check.why || 'Waiting for approval')}</span>`;
     case 'approved': return b('issue', 'Mark as sent to supplier', 'primary');
     case 'issued': case 'part': return b('receive', 'Mark as fully delivered', 'primary');
     default: return '';

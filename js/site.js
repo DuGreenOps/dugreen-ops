@@ -1,5 +1,5 @@
 // Site diary: daily jobcards (auto-filled from the programme), site instructions (signed on screen) and supervisor requests.
-import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, uid, typeColor, groupBy } from './util.js';
+import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, uid, typeColor, groupBy, isManager, TOOL_LIST, FUEL_TYPES, MOTORISED } from './util.js';
 import { sortAreas } from './areas.js';
 import { activeOn, taskPill, isOverdue } from './pow.js';
 import { captureSignature } from './sign.js';
@@ -7,18 +7,20 @@ import { openJobcardDoc, openSiDoc } from './docs.js';
 import { poAct } from './procure.js';
 import { contractFor, contractBadge, startContract } from './contracts.js';
 import { editStaff } from './staff.js';
+import * as Stores from './stores.js';
+import { reportIssue } from './equipment.js';
+import { newRequest, decideRequest, reqList, usedSoFar, HIRE_BASIS } from './requests.js';
+import { reportIncident, incidentsView, TOOLBOX_TOPICS } from './safety.js';
+export { REQ_KINDS, REQ_STATUS, reqPill, newRequest, decideRequest } from './requests.js';
 
 export const WEATHER = ['Sunny', 'Partly cloudy', 'Overcast', 'Light rain', 'Heavy rain', 'Storm', 'Windy', 'Very hot', 'Cold / frost'];
 export const PLANT_QUICK = ['TLB', 'Tipper truck', 'Bakkie (LDV)', 'Brush cutter', 'Lawn mower', 'Water cart', 'Plate compactor', 'Rotavator', 'Chainsaw'];
-export const REQ_KINDS = ['Materials', 'Plant / equipment', 'Labour', 'Transport', 'Information / decision', 'Other'];
 export const SI_ROLES = ['Client', "Client's representative", 'Architect / landscape architect', 'Engineer', 'Main contractor', 'Project manager', 'Du Green management', 'Other'];
 export const SI_STATUS = { open: 'Open', signed: 'Signed', priced: 'Priced', approved: 'Approved (variation)', rejected: 'Rejected', done: 'Completed' };
-export const REQ_STATUS = { pending: 'Pending', approved: 'Approved', declined: 'Declined', done: 'Done' };
 export const JC_STATUS = { draft: 'Draft', submitted: 'Submitted', approved: 'Approved' };
 const pill = (s, map, cls) => `<span class="pill ${cls[s] || 'mute'}">${esc(map[s] || s)}</span>`;
 export const jcPill = s => pill(s, JC_STATUS, { draft: 'warn', submitted: 'info', approved: 'ok' });
 export const siPill = s => pill(s, SI_STATUS, { open: 'warn', signed: 'info', priced: 'info', approved: 'ok', rejected: 'bad', done: 'mute' });
-export const reqPill = s => pill(s, REQ_STATUS, { pending: 'warn', approved: 'ok', declined: 'bad', done: 'mute' });
 
 export async function render(root, ctx) {
   const { store, project } = ctx;
@@ -30,18 +32,23 @@ export async function render(root, ctx) {
   const openIds = pos.filter(p => ['approved', 'issued', 'part'].includes(p.status)).map(p => p.id);
   const poLines = openIds.length ? await store.list('po_lines', { po_id: openIds }, 'sort') : [];
   const areas = sortAreas(areasRaw);
-  const D = { areas, areaBy: Object.fromEntries(areas.map(a => [a.id, a])), staff, staffBy: Object.fromEntries(staff.map(s => [s.id, s])), tasks, jobcards, sis, reqs, pos, poLines, contracts, sup: Object.fromEntries(suppliers.map(s => [s.id, s])) };
+  const hireIds = pos.filter(p => p.hire && !poLines.some(l => l.po_id === p.id)).map(p => p.id);
+  if (hireIds.length) poLines.push(...await store.list('po_lines', { po_id: hireIds }, 'sort'));
+  const S = sub === 'jobcard' ? await Stores.loadStores(store) : null;
+  const D = { areas, areaBy: Object.fromEntries(areas.map(a => [a.id, a])), staff, staffBy: Object.fromEntries(staff.map(s => [s.id, s])), tasks, jobcards, sis, reqs, pos, poLines, contracts, S, sup: Object.fromEntries(suppliers.map(s => [s.id, s])) };
   const openSI = sis.filter(s => ['open', 'signed', 'priced'].includes(s.status)).length, pendReq = reqs.filter(r => r.status === 'pending').length;
   root.innerHTML = `<div class="page">
     <div class="row"><div class="grow"><div class="eyebrow">Site Supervisor</div><h2 style="font-size:24px">Site diary</h2></div>
       <nav class="subtabs"><a href="#/p/${project.id}/site" class="${sub === 'jobcards' || sub === 'jobcard' ? 'on' : ''}">Daily jobcards</a>
         <a href="#/p/${project.id}/site/si" class="${sub === 'si' ? 'on' : ''}">Site instructions${openSI ? ` (${openSI})` : ''}</a>
-        <a href="#/p/${project.id}/site/requests" class="${sub === 'requests' ? 'on' : ''}">Requests${pendReq ? ` (${pendReq})` : ''}</a></nav></div>
+        <a href="#/p/${project.id}/site/requests" class="${sub === 'requests' ? 'on' : ''}">Requests${pendReq ? ` (${pendReq})` : ''}</a>
+        <a href="#/p/${project.id}/site/safety" class="${sub === 'safety' ? 'on' : ''}">Safety</a></nav></div>
     <div id="sv"></div></div>`;
   const el = root.querySelector('#sv');
   if (sub === 'jobcard') return jobcardView(el, ctx, D, arg || today());
   if (sub === 'si') return siList(el, ctx, D);
   if (sub === 'requests') return reqList(el, ctx, D);
+  if (sub === 'safety') return incidentsView(el, ctx, D);
   return jobcardList(el, ctx, D);
 }
 
@@ -78,14 +85,23 @@ async function jobcardView(el, ctx, D, date) {
     project_id: project.id, card_date: date, supervisor_id: supId || null, status: 'draft',
     weather: { am: '', pm: '', rain_mm: null, temp: null, lost_hours: null },
     staff: [], tasks: planned.map(t => ({ task_id: t.id, name: t.name, area: D.areaBy[t.area_id]?.code || '', state: '', pct: Number(t.pct) || 0, notes: '' })),
-    extra_tasks: [{ text: '', area: '', notes: '' }, { text: '', area: '', notes: '' }], plant: [], deliveries: [], subbies: [], issues: '', safety: '', visitors: '', notes: '', photos: [],
+    extra_tasks: [{ text: '', area: '', notes: '' }, { text: '', area: '', notes: '' }], plant: carryTools(D.jobcards, date), deliveries: [], subbies: [], issues: '', safety: '', visitors: '', notes: '', photos: [],
+    fuel: { received: [], used: [] }, resources: [], hire: [], toolbox: { held: false, topic: '', notes: '' },
   };
+  jc.plant = jc.plant || []; jc.fuel = jc.fuel || { received: [], used: [] }; jc.resources = jc.resources || []; jc.hire = jc.hire || []; jc.toolbox = jc.toolbox || { held: false, topic: '', notes: '' };
   // Add newly planned tasks that weren't on a saved draft.
   if (card && jc.status === 'draft') for (const t of planned) if (!jc.tasks.some(x => x.task_id === t.id)) jc.tasks.push({ task_id: t.id, name: t.name, area: D.areaBy[t.area_id]?.code || '', state: '', pct: Number(t.pct) || 0, notes: '' });
   const locked = jc.status !== 'draft';
-  const openPOs = D.pos.filter(p => ['approved', 'issued', 'part'].includes(p.status) || (jc.deliveries || []).some(d => d.po_id === p.id));
+  const openPOs = D.pos.filter(p => !p.hire && (['approved', 'issued', 'part'].includes(p.status) || (jc.deliveries || []).some(d => d.po_id === p.id)));
+  const hirePOs = D.pos.filter(p => p.hire && (['approved', 'issued', 'part'].includes(p.status) || jc.hire.some(h => h.po_id === p.id)));
+  const SS = D.S ? Stores.siteStores(D.S, project.id) : { held: [], incoming: [], returning: [] };
+  const openReqs = D.reqs.filter(r => (['fulfilling', 'on_site'].includes(r.status) || jc.resources.some(x => x.request_id === r.id)) && r.route !== 'hire' && (r.lines || []).length);
+  const prevCards = D.jobcards.filter(j => j.card_date < date);
+  const opening = {}; for (const j of prevCards) { for (const f of j.fuel?.received || []) opening[f.type] = (opening[f.type] || 0) + (Number(f.litres) || 0); for (const f of j.fuel?.used || []) opening[f.type] = (opening[f.type] || 0) - (Number(f.litres) || 0); }
+  const toolNames = () => [...new Set([...TOOL_LIST, ...(D.S?.items || []).filter(i => i.active !== false && ['tool', 'machine'].includes(i.kind)).map(i => i.name)])];
+  const siteTags = () => (D.S?.assets || []).filter(a => a.project_id === project.id && ['site', 'transit'].includes(a.status));
   jc.subbies = jc.subbies || [];
-  const canApprove = ['admin', 'qs'].includes(ctx.me?.role);
+  const canApprove = isManager(ctx.me);
   const active = D.staff.filter(s => s.active !== false && s.kind !== 'subcontractor');
   const subs = D.staff.filter(s => s.active !== false && s.kind === 'subcontractor');
   const cOf = id => contractFor(id, D.contracts, project.id, date);
@@ -132,8 +148,41 @@ async function jobcardView(el, ctx, D, date) {
     <section class="card"><div class="hd"><h3>✚ Other work done</h3><span class="small muted">Not on the plan</span><span class="grow"></span>${locked ? '' : '<button class="btn small" id="addx">+ Line</button>'}</div><div class="bd stack" style="gap:6px">
       ${(jc.extra_tasks || []).map((x, i) => `<div class="grid3"><input class="span2" data-xt="${i}" data-k="text" value="${esc(x.text)}" placeholder="Work done" ${dis}><select data-xt="${i}" data-k="area" ${dis}><option value="">Area</option>${D.areas.map(a => `<option ${x.area === a.code ? 'selected' : ''}>${esc(a.code || '')}</option>`).join('')}</select></div>`).join('')}</div></section>
 
-    <section class="card"><div class="hd"><h3>🚜 Plant & equipment</h3><span class="grow"></span>${locked ? '' : `<select id="pq" style="width:auto"><option value="">+ Add…</option>${PLANT_QUICK.map(p => `<option>${p}</option>`).join('')}<option value="__other">Other</option></select>`}</div>
-      ${(jc.plant || []).length ? `<div class="tbl"><table><thead><tr><th>Item</th><th class="n">Hours</th><th>Notes (hired from, breakdowns…)</th></tr></thead><tbody>${jc.plant.map((p, i) => `<tr><td><input data-pl="${i}" data-k="item" value="${esc(p.item)}" ${dis}></td><td class="n"><input class="num" style="width:70px" data-pl="${i}" data-k="hours" value="${p.hours ?? ''}" ${dis}></td><td><input data-pl="${i}" data-k="notes" value="${esc(p.notes || '')}" ${dis}></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No plant recorded.</div>'}</section>
+    <section class="card"><div class="hd"><h3>🧰 Tools & equipment on site</h3><span class="small muted">${jc.plant.reduce((t, p) => t + (Number(p.qty) || 0), 0)} items</span><span class="grow"></span>${locked ? '' : `<button class="btn small" id="tadd">+ Tool / equipment</button>${SS.held.length ? '<button class="btn small" id="tfill">From stores issues</button>' : ''}`}</div>
+      <datalist id="dl-tools">${toolNames().map(n => `<option>${esc(n)}</option>`).join('')}</datalist>
+      <datalist id="dl-tags">${siteTags().map(a => `<option value="${esc(a.tag_no)}">${esc(D.S.itemBy[a.item_id]?.name || '')}</option>`).join('')}</datalist>
+      ${jc.plant.length ? `<div class="tbl"><table><thead><tr><th>Tool / equipment</th><th>ID no.</th><th class="n">Qty</th><th class="n">Hours worked</th><th>Notes</th><th></th></tr></thead><tbody>${jc.plant.map((p, i) => `<tr><td><input data-pl="${i}" data-k="item" list="dl-tools" value="${esc(p.item)}" placeholder="pick or type" ${dis}></td>
+        <td><input style="width:110px" data-pl="${i}" data-k="tag" list="dl-tags" value="${esc(p.tag || '')}" placeholder="if tagged" ${dis}></td><td class="n"><input class="num" style="width:56px" data-pl="${i}" data-k="qty" inputmode="numeric" value="${p.qty ?? 1}" ${dis}></td>
+        <td class="n"><input class="num" style="width:64px" data-pl="${i}" data-k="hours" inputmode="decimal" value="${p.hours ?? ''}" placeholder="${MOTORISED.includes(p.item) ? 'hrs' : ''}" ${dis}></td><td><input data-pl="${i}" data-k="notes" value="${esc(p.notes || '')}" ${dis}></td>
+        <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-dmg="${i}" title="Report damage or breakdown">⚠ Report</button>${locked ? '' : ` <button class="btn small" type="button" data-pld="${i}" aria-label="Remove">✕</button>`}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No tools recorded. Add what is on site today; tomorrow’s jobcard starts from this list.</div>'}</section>
+
+    ${hirePOs.length ? `<section class="card"><div class="hd"><h3>🚜 Hired plant</h3><span class="small muted">Hours / days logged here make up the supplier's hire certificate.</span></div>
+      <div class="tbl"><table><thead><tr><th>Hire order</th><th class="n">Today</th><th>Notes</th><th>Off-hire</th></tr></thead><tbody>${hirePOs.map(p => { const h = jc.hire.find(x => x.po_id === p.id) || {}; return `<tr><td><b>${esc(p.hire_item || 'Plant')}</b><div class="small muted">${esc(p.number)} · ${esc(D.sup[p.supplier_id]?.name || '')} · ${money(Number(p.hire_rate) || 0)} ${esc(HIRE_BASIS[p.hire_basis] || '')}</div></td>
+        <td class="n"><input class="num" style="width:70px" data-hr="${p.id}" inputmode="decimal" value="${h.qty ?? ''}" ${dis}> <span class="small muted">${esc(p.hire_basis || 'hour')}s</span></td><td><input data-hn="${p.id}" value="${esc(h.notes || '')}" placeholder="e.g. 2h standing, broke down 14:00" ${dis}></td><td><label class="chk"><input type="checkbox" data-ho="${p.id}" ${h.offhire ? 'checked' : ''} ${dis}> Off-hired today</label></td></tr>`; }).join('')}</tbody></table></div></section>` : ''}
+
+    <section class="card"><div class="hd"><h3>⛽ Fuel</h3><span class="grow"></span>${locked ? '' : '<button class="btn small" id="fadd">+ Fuel received</button><button class="btn small" id="uadd">+ Allocate to machine</button>'}</div>
+      <div class="bd stack" style="gap:6px">
+      ${jc.fuel.received.length ? `<div class="small muted">Received</div>${jc.fuel.received.map((f, i) => `<div class="grid3"><select data-fr="${i}" data-k="type" ${dis}>${FUEL_TYPES.map(x => `<option ${f.type === x ? 'selected' : ''}>${x}</option>`).join('')}</select><input class="num" data-fr="${i}" data-k="litres" inputmode="decimal" value="${f.litres ?? ''}" placeholder="litres" ${dis}>
+        <div class="row" style="gap:4px"><select data-fr="${i}" data-k="source" style="width:auto" ${dis}>${['Central Stores', 'Fuel station', 'Fuel card', 'Supplier delivery', 'Other'].map(x => `<option ${f.source === x ? 'selected' : ''}>${x}</option>`).join('')}</select><input data-fr="${i}" data-k="ref" value="${esc(f.ref || '')}" placeholder="slip / voucher no." style="flex:1" ${dis}></div></div>`).join('')}` : ''}
+      ${jc.fuel.used.length ? `<div class="small muted">Allocated to</div>${jc.fuel.used.map((f, i) => `<div class="grid3"><input data-fu="${i}" data-k="to" list="dl-fuelto" value="${esc(f.to || '')}" placeholder="machine (e.g. Brushcutter BC-002)" ${dis}><select data-fu="${i}" data-k="type" ${dis}>${FUEL_TYPES.map(x => `<option ${f.type === x ? 'selected' : ''}>${x}</option>`).join('')}</select><input class="num" data-fu="${i}" data-k="litres" inputmode="decimal" value="${f.litres ?? ''}" placeholder="litres" ${dis}></div>`).join('')}` : ''}
+      <datalist id="dl-fuelto">${jc.plant.filter(p => p.item).map(p => `<option>${esc(p.item + (p.tag ? ' ' + p.tag : ''))}</option>`).join('')}${MOTORISED.map(m => `<option>${esc(m)}</option>`).join('')}</datalist>
+      ${(() => { const types = [...new Set([...Object.keys(opening).filter(k => Math.abs(opening[k]) > 0.001), ...jc.fuel.received.map(f => f.type), ...jc.fuel.used.map(f => f.type)])]; return types.length ? `<div class="tbl"><table><thead><tr><th>Fuel</th><th class="n">Opening</th><th class="n">Received</th><th class="n">Allocated</th><th class="n">Closing on site</th></tr></thead><tbody>${types.map(k => { const o = opening[k] || 0, r = jc.fuel.received.filter(f => f.type === k).reduce((t, f) => t + (Number(f.litres) || 0), 0), u = jc.fuel.used.filter(f => f.type === k).reduce((t, f) => t + (Number(f.litres) || 0), 0), c = o + r - u; return `<tr><td>${esc(k)}</td><td class="n">${fmt(o, 1)}</td><td class="n">${fmt(r, 1)}</td><td class="n">${fmt(u, 1)}</td><td class="n" style="${c < -0.001 ? 'color:var(--bad);font-weight:700' : ''}">${fmt(c, 1)} L${c < -0.001 ? ' ⚠' : ''}</td></tr>`; }).join('')}</tbody></table></div>` : '<span class="small muted">No fuel on site. Record fuel when it arrives, then allocate it to pumps, brushcutters, mowers…</span>'; })()}
+      </div></section>
+
+    <section class="card"><div class="hd"><h3>🏬 From Central Stores</h3><span class="grow"></span>${locked ? '' : `${SS.held.length ? '<button class="btn small" id="ret">Return items to stores</button>' : ''}`}</div><div class="bd stack" style="gap:8px">
+      ${SS.incoming.length ? SS.incoming.map(v => `<div class="row"><span class="pill warn">To receive</span><span class="grow"><b>${esc(v.number)}</b> · ${esc((v.lines || []).map(l => `${l.tag || fmt(l.qty) + ' ' + (l.unit || '')} ${l.name}`).join(', '))}</span><button class="btn small primary" type="button" data-rv="${v.id}">Confirm receipt</button></div>`).join('') : '<span class="small muted">Nothing on its way from stores.</span>'}
+      ${SS.returning.map(v => `<div class="row"><span class="pill info">Returning</span><span class="grow small">${esc(v.number)} · ${esc((v.lines || []).map(l => l.tag || l.name).join(', '))}</span></div>`).join('')}
+      ${SS.held.length ? `<details><summary class="small">Held on this site from stores (${SS.held.reduce((t, h) => t + h.total, 0)})</summary><div class="small">${SS.held.map(h => `${esc(h.item.name)}: ${h.qty ? fmt(h.qty) + ' ' + esc(h.item.unit || '') : ''}${h.assets.length ? ' ' + h.assets.map(a => esc(a.tag_no)).join(', ') : ''}`).join(' · ')}</div></details>` : ''}
+    </div></section>
+
+    ${openReqs.length ? `<section class="card"><div class="hd"><h3>✅ Approved resources – log what was used</h3></div>
+      <div class="tbl"><table><thead><tr><th>Request</th><th>Item</th><th class="n">Approved</th><th class="n">Used so far</th><th class="n">Used / installed today</th></tr></thead><tbody>${openReqs.map(r => { const u = usedSoFar(r, D.jobcards.filter(j => j.id !== card?.id)); return (r.lines || []).map((l, li) => { const x = jc.resources.find(y => y.request_id === r.id && y.line === li) || {}; return `<tr>${li === 0 ? `<td rowspan="${r.lines.length}"><b>${esc(r.description)}</b><div class="small muted">${esc(r.kind)}${r.route === 'stores' ? ' · from stores' : r.route === 'po' ? ' · ordered' : ''}</div><label class="chk small"><input type="checkbox" data-rf="${r.id}" ${jc.resources.some(y => y.request_id === r.id && y.finished) ? 'checked' : ''} ${dis}> Finished with this</label></td>` : ''}
+        <td>${esc(l.name)}</td><td class="n">${fmt(l.qty)} ${esc(l.unit)}</td><td class="n">${fmt(u.used[li])}</td><td class="n"><input class="num" style="width:70px" data-rs="${r.id}" data-li="${li}" inputmode="decimal" value="${x.qty ?? ''}" ${dis}></td></tr>`; }).join(''); }).join('')}</tbody></table></div></section>` : ''}
+
+    <section class="card"><div class="hd"><h3>🦺 Toolbox talk</h3></div><div class="bd grid3">
+      <label class="chk" style="align-self:end;padding-bottom:10px"><input type="checkbox" name="tb_held" ${jc.toolbox.held ? 'checked' : ''} ${dis}> Held this morning</label>
+      <label class="f">Topic<input name="tb_topic" list="dl-tb" value="${esc(jc.toolbox.topic || '')}" ${dis}></label><label class="f">Notes<input name="tb_notes" value="${esc(jc.toolbox.notes || '')}" ${dis}></label>
+      <datalist id="dl-tb">${TOOLBOX_TOPICS.map(x => `<option>${esc(x)}</option>`).join('')}</datalist></div></section>
 
     <section class="card"><div class="hd"><h3>📦 Deliveries received</h3></div><div class="bd stack" style="gap:8px">
       ${openPOs.length ? openPOs.map(p => { const d = (jc.deliveries || []).find(x => x.po_id === p.id) || {}; return `<div class="row"><select data-dv="${p.id}" style="width:auto" ${dis}><option value="">Not today</option><option value="full" ${d.state === 'full' ? 'selected' : ''}>Delivered in full</option><option value="part" ${d.state === 'part' ? 'selected' : ''}>Part delivery</option></select>
@@ -148,7 +197,7 @@ async function jobcardView(el, ctx, D, date) {
       <label class="f">Safety incidents / near misses<textarea name="safety" ${dis} placeholder="None">${esc(jc.safety || '')}</textarea></label>
       <label class="f">Visitors / instructions received<textarea name="visitors" ${dis}>${esc(jc.visitors || '')}</textarea></label>
       <label class="f">Notes for tomorrow<textarea name="notes" ${dis}>${esc(jc.notes || '')}</textarea></label>
-      <div class="row"><a class="btn small" href="#/p/${project.id}/site/si">Record a site instruction</a><button class="btn small" id="req" type="button">Request materials / plant / labour</button></div></div></section>
+      <div class="row"><a class="btn small" href="#/p/${project.id}/site/si">Record a site instruction</a><button class="btn small" id="req" type="button">Request materials / tools / plant / fuel</button><button class="btn small" id="inc" type="button">⚠ Report safety incident</button></div></div></section>
 
     <section class="card"><div class="hd"><h3>📷 Photos</h3><span class="grow"></span>${locked ? '' : '<label class="btn small">Add photo<input type="file" accept="image/*" capture="environment" id="ph" hidden multiple></label>'}</div>
       <div class="bd row">${(jc.photos || []).map(p => `<img alt="Site photo" style="width:96px;height:96px;object-fit:cover;border-radius:8px;border:1px solid var(--line)" src="${photoUrls[p.path] || ''}">`).join('') || '<span class="small muted">No photos.</span>'}</div></section>
@@ -171,7 +220,12 @@ async function jobcardView(el, ctx, D, date) {
     jc.subbies = subs.filter(s => q(`[data-sb="${s.id}"]`)?.checked).map(s => ({ person_id: s.id, name: s.name, trade: s.role, crew: num(q(`[data-sbc="${s.id}"]`).value) || 1, hours: num(q(`[data-sbh="${s.id}"]`).value) ?? 8, work: q(`[data-sbw="${s.id}"]`).value, contract_id: cOf(s.id).ok ? cOf(s.id).c.id : null }));
     el.querySelectorAll('[data-tk]').forEach(i => { const t = jc.tasks[+i.dataset.tk]; t[i.dataset.k] = i.dataset.k === 'pct' ? num(i.value) : i.value; if (i.dataset.k === 'state' && i.value === 'done') t.pct = 100; });
     el.querySelectorAll('[data-xt]').forEach(i => { const x = jc.extra_tasks[+i.dataset.xt]; if (x) x[i.dataset.k] = i.value; });
-    el.querySelectorAll('[data-pl]').forEach(i => { jc.plant[+i.dataset.pl][i.dataset.k] = i.dataset.k === 'hours' ? num(i.value) : i.value; });
+    el.querySelectorAll('[data-pl]').forEach(i => { jc.plant[+i.dataset.pl][i.dataset.k] = ['hours', 'qty'].includes(i.dataset.k) ? num(i.value) : i.value; });
+    jc.hire = hirePOs.map(p => ({ po_id: p.id, po_number: p.number, item: p.hire_item, basis: p.hire_basis, qty: num(q(`[data-hr="${p.id}"]`).value), notes: q(`[data-hn="${p.id}"]`).value, offhire: q(`[data-ho="${p.id}"]`).checked })).filter(h => h.qty || h.notes || h.offhire);
+    el.querySelectorAll('[data-fr]').forEach(i => { jc.fuel.received[+i.dataset.fr][i.dataset.k] = i.dataset.k === 'litres' ? num(i.value) : i.value; });
+    el.querySelectorAll('[data-fu]').forEach(i => { jc.fuel.used[+i.dataset.fu][i.dataset.k] = i.dataset.k === 'litres' ? num(i.value) : i.value; });
+    jc.resources = [...el.querySelectorAll('[data-rs]')].map(i => ({ request_id: i.dataset.rs, line: +i.dataset.li, qty: num(i.value), finished: !!q(`[data-rf="${i.dataset.rs}"]`)?.checked })).filter(x => x.qty || x.finished);
+    jc.toolbox = { held: q('[name=tb_held]').checked, topic: q('[name=tb_topic]').value, notes: q('[name=tb_notes]').value };
     const dv = []; el.querySelectorAll('[data-dv]').forEach(s => { if (s.value) { const p = D.pos.find(x => x.id === s.dataset.dv); const lines = s.value === 'part' ? [...el.querySelectorAll(`[data-dvl="${p.id}"] [data-dq]`)].map(i => ({ po_line_id: i.dataset.dq, qty: num(i.value) })).filter(x => x.qty) : []; dv.push({ po_id: p.id, po_number: p.number, state: s.value, note: q(`[data-dvn="${p.id}"]`).value, lines }); } });
     const od = q('[name=other_deliv]').value; if (od) dv.push({ po_id: null, note: od });
     jc.deliveries = dv;
@@ -199,7 +253,20 @@ async function jobcardView(el, ctx, D, date) {
       q('#adds') && (q('#adds').onclick = () => addPerson('subcontractor'));
       el.querySelectorAll('[data-dv]').forEach(s => s.onchange = () => { const box = el.querySelector(`[data-dvl="${s.dataset.dv}"]`); if (box) box.hidden = s.value !== 'part'; });
       q('#addx').onclick = () => { read(); jc.extra_tasks.push({ text: '', area: '', notes: '' }); draw(); };
-      q('#pq').onchange = e => { read(); const v = e.target.value; if (!v) return; jc.plant.push({ item: v === '__other' ? '' : v, hours: null, notes: '' }); draw(); };
+      q('#tadd').onclick = () => { read(); jc.plant.push({ item: '', tag: '', qty: 1, hours: null, notes: '' }); draw(); el.querySelectorAll('[data-k=item][data-pl]')[jc.plant.length - 1]?.focus(); };
+      q('#tfill') && (q('#tfill').onclick = () => { read(); for (const h of SS.held.filter(h => ['tool', 'machine'].includes(h.item.kind))) { for (const a of h.assets) if (!jc.plant.some(p => p.tag === a.tag_no)) jc.plant.push({ item: h.item.name, tag: a.tag_no, qty: 1, hours: null, notes: '' }); if (h.qty > 0 && !jc.plant.some(p => p.item === h.item.name && !p.tag)) jc.plant.push({ item: h.item.name, tag: '', qty: h.qty, hours: null, notes: '' }); } draw(); });
+      el.querySelectorAll('[data-pld]').forEach(b => b.onclick = () => { read(); jc.plant.splice(+b.dataset.pld, 1); draw(); });
+      q('#fadd').onclick = () => { read(); jc.fuel.received.push({ type: 'Petrol', litres: null, source: 'Fuel station', ref: '' }); draw(); };
+      q('#uadd').onclick = () => { read(); jc.fuel.used.push({ to: '', type: 'Petrol', litres: null }); draw(); };
+      el.querySelectorAll('[data-fr][data-k=litres],[data-fu][data-k=litres],[data-fr][data-k=type],[data-fu][data-k=type]').forEach(i => i.onchange = () => { read(); setTimeout(draw, 0); });
+      el.querySelectorAll('[data-rv]').forEach(b => b.onclick = async () => {
+        read(); const v = D.S.vouchers.find(x => x.id === b.dataset.rv);
+        if (!(await Stores.receiveVoucher(ctx, D.S, v))) return;
+        const fresh = (await store.list('store_vouchers', {}, null)).find(x => x.id === v.id);
+        for (const l of fresh?.lines || []) { const it = D.S.itemBy[l.item_id]; if (it?.kind === 'fuel' && l.qty_received) jc.fuel.received.push({ type: FUEL_TYPES.find(f => it.name.toLowerCase().includes(f.toLowerCase())) || it.name, litres: Number(l.qty_received), source: 'Central Stores', ref: v.number }); }
+        await save(); Object.assign(D.S, await Stores.loadStores(store)); Object.assign(SS, Stores.siteStores(D.S, project.id)); draw();
+      });
+      q('#ret') && (q('#ret').onclick = async () => { read(); if (await Stores.returnDialog(ctx, D.S, SS.loc)) { Object.assign(D.S, await Stores.loadStores(store)); Object.assign(SS, Stores.siteStores(D.S, project.id)); draw(); } });
       q('#ph') && (q('#ph').onchange = async e => {
         read();
         for (const f of e.target.files) {
@@ -226,6 +293,7 @@ async function jobcardView(el, ctx, D, date) {
         }
         // deliveries → purchase orders
         await applyDeliveries(store, D, jc.deliveries, ctx.me);
+        await applySiteUse(ctx, D, jc, card);
         toast('Jobcard submitted'); ctx.reload();
       };
     } else {
@@ -239,9 +307,49 @@ async function jobcardView(el, ctx, D, date) {
       if (c === 'deleted') D.contracts = D.contracts.filter(x => x.id !== r.c?.id);
       draw();
     });
+    el.querySelectorAll('[data-dmg]').forEach(b => b.onclick = async () => { read(); const p = jc.plant[+b.dataset.dmg]; const r = await reportIssue(ctx, D.S, { itemName: p.item, tag: p.tag, projectId: project.id }); if (r) { p.notes = [p.notes, `${r.kind} – reported`].filter(Boolean).join('; '); draw(); } });
+    q('#inc').onclick = async () => { read(); const r = await reportIncident(ctx, { projectId: project.id, date, people: D.staff }); if (r) { jc.safety = [jc.safety, `${r.kind}: ${r.description}`].filter(Boolean).join('\n'); draw(); } };
     q('#req').onclick = async () => { read(); if (await newRequest(ctx, D, { requested_by: D.staffBy[jc.supervisor_id]?.name })) toast('Request sent to Matt'); };
   };
   draw();
+}
+
+// Tomorrow's tools list starts from the last jobcard on this project (hours cleared).
+function carryTools(cards, date) {
+  const prev = cards.filter(j => j.card_date < date).sort((a, b) => b.card_date.localeCompare(a.card_date))[0];
+  return (prev?.plant || []).filter(p => p.item).map(p => ({ item: p.item, tag: p.tag || '', qty: p.qty ?? 1, hours: null, notes: '' }));
+}
+
+// On submit: machine hours and fuel onto the equipment register, request usage and off-hire, consumables used.
+async function applySiteUse(ctx, D, jc, card) {
+  const { store } = ctx;
+  const S = D.S || await Stores.loadStores(store);
+  const byTag = t => t && S.assets.find(a => a.tag_no.toLowerCase() === String(t).trim().toLowerCase());
+  for (const p of jc.plant) { const a = byTag(p.tag); if (a && Number(p.hours) > 0) await store.update('assets', a.id, { hours: (Number(a.hours) || 0) + Number(p.hours), last_used: jc.card_date }); }
+  // Fuel allocated on site comes out of the stores fuel held there (if any was issued from Central Stores).
+  for (const [type, litres] of Object.entries(jc.fuel.used.reduce((m, f) => (m[f.type] = (m[f.type] || 0) + (Number(f.litres) || 0), m), {}))) {
+    const it = S.items.find(i => i.kind === 'fuel' && i.name.toLowerCase().includes(type.toLowerCase())); if (!it || !litres) continue;
+    const held = Stores.qtyAt(S, it.id, 'project:' + jc.project_id), take = Math.min(held, litres);
+    if (take > 0) await store.insert('stock_moves', { item_id: it.id, qty: take, type: 'consume', from_loc: 'project:' + jc.project_id, to_loc: 'out', move_date: jc.card_date, ref: 'Jobcard ' + jc.card_date, note: 'Fuel allocated to machines' });
+  }
+  for (const f of jc.fuel.used) { const tag = (String(f.to || '').match(/[A-Z]{1,5}-?\d{2,}/i) || [])[0]; const a = byTag(tag) || S.assets.find(x => String(f.to || '').toLowerCase().includes(x.tag_no.toLowerCase())); if (a && Number(f.litres) > 0) await store.update('assets', a.id, { fuel_l: (Number(a.fuel_l) || 0) + Number(f.litres) }); }
+  const all = [...D.jobcards.filter(j => j.id !== card.id), { ...jc, status: 'submitted' }];
+  for (const r of D.reqs.filter(r => jc.resources.some(x => x.request_id === r.id))) {
+    const u = usedSoFar(r, all), fin = jc.resources.some(x => x.request_id === r.id && x.finished);
+    const allUsed = (r.lines || []).every((l, i) => u.used[i] >= Number(l.qty) - 1e-9);
+    await store.update('requests', r.id, { status: fin || allUsed ? 'complete' : 'on_site' });
+    if (r.route === 'stores') for (const x of jc.resources.filter(x => x.request_id === r.id && x.qty)) {
+      const l = r.lines[x.line], it = S.items.find(i => i.name.toLowerCase() === String(l?.name).toLowerCase());
+      if (it && ['consumable', 'material', 'fuel'].includes(it.kind)) await store.insert('stock_moves', { item_id: it.id, qty: Number(x.qty), type: 'consume', from_loc: 'project:' + jc.project_id, to_loc: 'out', move_date: jc.card_date, ref: 'Jobcard ' + jc.card_date, note: r.description });
+    }
+  }
+  for (const h of jc.hire) {
+    const p = D.pos.find(x => x.id === h.po_id); if (!p) continue;
+    const r = D.reqs.find(x => x.po_id === p.id);
+    if (r && r.status !== 'complete') await store.update('requests', r.id, { status: h.offhire ? 'complete' : 'on_site' });
+    if (h.offhire) await store.update('purchase_orders', p.id, { status: 'received', received_at: new Date().toISOString(), hire_end: jc.card_date });
+    else if (p.status === 'approved') await store.update('purchase_orders', p.id, { status: 'issued' });
+  }
 }
 
 // Deliveries on a submitted jobcard update the purchase orders: full → every line received; part → the quantities entered.
@@ -278,7 +386,7 @@ function siList(el, ctx, D) {
 export async function editSI(ctx, D, si) {
   const { store, project } = ctx;
   const draft = { ...(si || { si_date: today(), status: 'open', cost_impact: false, photos: [] }) };
-  const canDecide = ['admin', 'qs'].includes(ctx.me?.role);
+  const canDecide = isManager(ctx.me);
   const body = () => `
     <div class="grid3"><label class="f">Date<input name="si_date" type="date" value="${esc(draft.si_date)}"></label>
       <label class="f span2">Area<select name="area_id"><option value="">Whole site</option>${D.areas.map(a => `<option value="${a.id}" ${draft.area_id === a.id ? 'selected' : ''}>${esc(a.code || '')} ${esc(a.name || a.type || '')}</option>`).join('')}</select></label></div>
@@ -306,39 +414,3 @@ export async function editSI(ctx, D, si) {
   toast(`${out.number} saved`); ctx.reload();
 }
 
-// ------------------------------------------------------------ requests
-function reqList(el, ctx, D) {
-  const list = [...D.reqs].reverse();
-  const canDecide = ctx.me?.role === 'admin';
-  el.innerHTML = `<section class="card"><div class="hd"><h3>Requests from site</h3><span class="small muted">Materials, plant, labour or decisions the supervisor needs.</span><span class="grow"></span><button class="btn primary" id="new">+ New request</button></div>
-    ${list.length ? `<div class="tbl"><table><thead><tr><th>Date</th><th>Type</th><th>Request</th><th>Needed by</th><th>From</th><th>Status</th><th></th></tr></thead><tbody>
-    ${list.map(r => `<tr><td>${fmtDate(r.created_at)}</td><td>${esc(r.kind)}</td><td><b>${esc(r.description)}</b>${r.items ? `<div class="small muted">${esc(r.items)}</div>` : ''}${r.response ? `<div class="small">↳ ${esc(r.response)}</div>` : ''}</td>
-      <td>${r.needed_by ? fmtDate(r.needed_by) : '–'}</td><td class="small">${esc(r.requested_by || '')}</td><td>${reqPill(r.status)}</td>
-      <td class="n">${canDecide && r.status === 'pending' ? `<button class="btn small primary" data-dec="approved" data-r="${r.id}">Approve</button> <button class="btn small" data-dec="declined" data-r="${r.id}">Decline</button>` : r.status === 'approved' ? `<button class="btn small" data-dec="done" data-r="${r.id}">Mark done</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
-    : '<div class="empty"><b>No requests</b>Supervisors can request materials, plant or labour here or from the daily jobcard.</div>'}</section>`;
-  el.querySelector('#new').onclick = async () => { if (await newRequest(ctx, D, {})) ctx.reload(); };
-  el.querySelectorAll('[data-dec]').forEach(b => b.onclick = () => decideRequest(ctx, D.reqs.find(r => r.id === b.dataset.r), b.dataset.dec));
-}
-
-export async function decideRequest(ctx, r, decision) {
-  let response = r.response || '';
-  if (decision !== 'done') {
-    const v = await dialog({ title: `${decision === 'approved' ? 'Approve' : 'Decline'} request`, body: `<p><b>${esc(r.description)}</b></p><label class="f">Reply to the supervisor (optional)<input name="r" value="${esc(response)}"></label>`, buttons: [{ label: 'Cancel', value: null }, { label: decision === 'approved' ? 'Approve' : 'Decline', primary: decision === 'approved', danger: decision !== 'approved', value: w => w.querySelector('[name=r]').value }] });
-    if (v == null) return; response = v;
-  }
-  await ctx.store.update('requests', r.id, { status: decision, response, decided_at: new Date().toISOString(), decided_by: ctx.me?.id && ctx.me.id !== 'demo-user' ? ctx.me.id : null });
-  toast({ approved: 'Approved', declined: 'Declined', done: 'Marked done' }[decision]); ctx.reload();
-}
-
-export async function newRequest(ctx, D, pre) {
-  const { store, project } = ctx;
-  const v = await dialog({
-    title: 'New request', body: `<div class="grid2"><label class="f">Type<select name="kind">${REQ_KINDS.map(k => `<option>${k}</option>`).join('')}</select></label><label class="f">Needed by<input name="needed_by" type="date" value="${addDays(today(), 2)}"></label></div>
-      <label class="f">What do you need?<input name="description" required placeholder="e.g. 3 loads topsoil for G4"></label>
-      <label class="f">Details / quantities<textarea name="items"></textarea></label>
-      <label class="f">Requested by<input name="requested_by" value="${esc(pre.requested_by || ctx.me?.full_name || '')}"></label>`,
-    buttons: [{ label: 'Cancel', value: null }, { label: 'Send request', primary: true, value: w => formData(w), validate: w => !!w.querySelector('[name=description]').value.trim() }],
-  });
-  if (!v) return null;
-  return store.insert('requests', { project_id: project.id, kind: v.kind, description: v.description.trim(), items: v.items || null, needed_by: v.needed_by || null, requested_by: v.requested_by || null, status: 'pending' });
-}

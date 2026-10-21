@@ -1,6 +1,6 @@
 // Reports built from the daily jobcards: progress reports for any period (internal or client copy)
 // and the handover report with snag list and client sign-off. The cost report lives in costs.js.
-import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, weekStart, groupBy, uid } from './util.js';
+import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, weekStart, groupBy, uid, isManager } from './util.js';
 import { loadProcurement } from './procure.js';
 import { progress, plannedPct, isOverdue, TASK_STATUS } from './pow.js';
 import { sortAreas } from './areas.js';
@@ -162,7 +162,7 @@ async function handoverView(el, ctx) {
         <div class="bd"><textarea name="care_notes" rows="8" placeholder="Watering, mowing, fertilising, pruning and irrigation care for the first months" ${dis}>${esc(h.care_notes || '')}</textarea></div></section>
       <section class="card"><div class="bd stack"><label class="f">Notes<textarea name="notes" ${dis}>${esc(h.notes || '')}</textarea></label>
         ${h.client_sign ? `<div class="row"><div><div class="small muted">Client</div><img alt="Client signature" src="${h.client_sign}" style="height:70px;background:#fff;border:1px solid var(--line);border-radius:8px"></div>${h.dg_sign ? `<div><div class="small muted">Du Green</div><img alt="Du Green signature" src="${h.dg_sign}" style="height:70px;background:#fff;border:1px solid var(--line);border-radius:8px"></div>` : ''}</div>` : ''}
-        <div class="row"><span class="grow"></span>${locked ? (['admin', 'qs'].includes(ctx.me?.role) ? '<button class="btn" id="reopen">Reopen</button>' : '') : '<button class="btn" id="save">Save</button><button class="btn primary" id="sign">Client signs handover</button>'}</div></div></section>`;
+        <div class="row"><span class="grow"></span>${locked ? (isManager(ctx.me) ? '<button class="btn" id="reopen">Reopen</button>' : '') : '<button class="btn" id="save">Save</button><button class="btn primary" id="sign">Client signs handover</button>'}</div></div></section>`;
     wire();
   };
   const read = () => {

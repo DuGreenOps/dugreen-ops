@@ -16,6 +16,8 @@ import * as Dashboard from './dashboard.js';
 import * as Certs from './certs.js';
 import * as Reports from './reports.js';
 import { journey } from './journey.js';
+import * as Stores from './stores.js';
+import { DEFAULT_LIMITS } from './util.js';
 import { renderVehicleSettings, renderSubTermsSettings } from './staff.js';
 import { getSetting, setSetting } from './store.js';
 import { openClaude } from './claude.js';
@@ -66,6 +68,7 @@ async function route() {
     if (parts[0] === 'p' && parts[1]) return await renderProject(parts[1], parts[2] || (me?.role === 'supervisor' ? 'site' : 'areas'), parts.slice(3));
     if (parts[0] === 'projects') { setNav('projects'); return await renderHome(); }
     if (parts[0] === 'staff' || parts[0] === 'people') { setNav('staff'); return await Staff.render(app, ctx, parts.slice(1)); }
+    if (parts[0] === 'stores') { setNav('stores'); return await Stores.render(app, ctx, parts.slice(1)); }
     if (parts[0] === 'library') { setNav('library'); return await Library.render(app, ctx, parts.slice(1)); }
     if (parts[0] === 'settings') { setNav('settings'); return await renderSettings(); }
     setNav('home'); return await Dashboard.render(app, ctx);
@@ -219,6 +222,9 @@ async function renderSettings() {
       </tbody></table></div></section>` : ''}
     <section class="card"><div class="hd"><h2>Transport rates</h2><span class="small muted">Defaults offered when the QS adds a transport line</span></div><div id="vset"></div>
       <div class="bd row"><label class="f" style="max-width:240px">Casual worker day rate (E)<input id="crate" inputmode="decimal" ${isAdmin || store.mode === 'demo' ? '' : 'disabled'}></label><span class="small muted">Used for unnamed casual workers on older jobcards. Named people are costed from the rates sheet.</span></div></section>
+    <section class="card"><div class="hd"><h2>Approval limits</h2><span class="small muted">Requests and purchase orders (incl. VAT). Matt approves anything above these.</span></div>
+      <div class="bd grid3"><label class="f">Operations Manager (E)<input id="lim_ops" inputmode="decimal" ${isAdmin || store.mode === 'demo' ? '' : 'disabled'}></label><label class="f">Procurement (E)<input id="lim_proc" inputmode="decimal" ${isAdmin || store.mode === 'demo' ? '' : 'disabled'}></label>
+      ${isAdmin || store.mode === 'demo' ? '<div style="align-self:end"><button class="btn small primary" id="lim_save">Save limits</button></div>' : ''}</div></section>
     <section class="card"><div class="hd"><h2>Standard subcontract terms</h2></div><div id="sterms"></div></section>
     <section class="card"><div class="hd"><h2>Server</h2><span class="pill ${store.mode === 'cloud' ? 'ok' : 'warn'}">${store.mode === 'cloud' ? 'Connected' : 'Demo mode'}</span></div><div class="bd stack">
       <p class="small muted">The shared server (Supabase) stores the team's data and files and runs Claude for the app. Your administrator sets this up once.</p>
@@ -233,7 +239,9 @@ async function renderSettings() {
   </div>`;
   const $ = s => app.querySelector(s);
   renderVehicleSettings(app.querySelector('#vset'), store, isAdmin || store.mode === 'demo');
-  renderSubTermsSettings(app.querySelector('#sterms'), store, ['admin', 'qs'].includes(me?.role) || store.mode === 'demo');
+  getSetting(store, 'approval_limits', null).then(v => { const L = v || DEFAULT_LIMITS; $('#lim_ops').value = L.ops ?? ''; $('#lim_proc').value = L.procurement ?? ''; });
+  $('#lim_save')?.addEventListener('click', async () => { await setSetting(store, 'approval_limits', { ops: num($('#lim_ops').value) ?? 0, procurement: num($('#lim_proc').value) ?? 0 }); toast('Approval limits saved'); });
+  renderSubTermsSettings(app.querySelector('#sterms'), store, ['admin', 'qs', 'ops'].includes(me?.role) || store.mode === 'demo');
   getSetting(store, 'casual_day_rate', null).then(v => { $('#crate').value = v ?? ''; });
   $('#crate').onchange = async e => { await setSetting(store, 'casual_day_rate', num(e.target.value)); toast('Casual day rate saved'); };
   $('#so') && ($('#so').onclick = async () => { await store.signOut(); location.hash = '#/'; location.reload(); });

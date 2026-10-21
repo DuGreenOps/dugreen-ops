@@ -5,6 +5,10 @@ import { projectFinancials } from './costs.js';
 import { poAct, statusPill } from './procure.js';
 import { decideRequest, siPill, reqPill } from './site.js';
 import { contractFor } from './contracts.js';
+import { approvalCheck, canStores } from './util.js';
+import { getLimits, reqValue, fulfilRequest } from './requests.js';
+import * as Stores from './stores.js';
+import { serviceDue } from './equipment.js';
 
 export async function render(app, ctx) {
   const { store, me } = ctx;
@@ -12,7 +16,14 @@ export async function render(app, ctx) {
     store.list('projects', {}, 'created_at'), store.list('tasks', {}, null), store.list('purchase_orders', {}, null), store.list('po_lines', {}, null),
     store.list('requests', {}, null), store.list('site_instructions', {}, null), store.list('jobcards', {}, null), store.list('staff', {}, 'name'), store.list('suppliers', {}, null),
     store.list('contracts', {}, null), store.list('claims', {}, null), store.list('sub_certs', {}, null)]);
-  const P = Object.fromEntries(projects.map(p => [p.id, p])), sup = Object.fromEntries(suppliers.map(s => [s.id, s])), staffBy = Object.fromEntries(staff.map(s => [s.id, s]));
+  const [limits, S, incidents] = await Promise.all([getLimits(store), Stores.loadStores(store), store.list('incidents', {}, null)]);
+  const toSupply = reqs.filter(r => r.status === 'approved' && projects.some(p => p.id === r.project_id));
+  const lowStock = S.items.filter(i => i.active !== false && Stores.itemTotals(S, i).low);
+  const svcDue = S.assets.filter(a => !['written_off', 'lost'].includes(a.status)).map(a => ({ a, d: serviceDue(S, a) })).filter(x => x.d && x.d.state !== 'ok');
+  const openEq = S.issues.filter(i => ['open', 'in_repair'].includes(i.status));
+  const awaitingSite = S.vouchers.filter(v => v.kind === 'issue' && v.status === 'issued'), returnsIn = S.vouchers.filter(v => v.kind === 'return' && v.status === 'returned'), shortV = S.vouchers.filter(v => v.status === 'part');
+  const openInc = incidents.filter(i => i.status !== 'closed');
+  const P = Object.fromEntries(projects.map(p => [p.id, p])), P_ok = id => !!projects.find(p => p.id === id), sup = Object.fromEntries(suppliers.map(s => [s.id, s])), staffBy = Object.fromEntries(staff.map(s => [s.id, s]));
   const live = projects.filter(p => !['complete'].includes(p.status));
   const t0 = today();
   const overdue = tasks.filter(t => P[t.project_id] && isOverdue(t)).sort((a, b) => a.end_date.localeCompare(b.end_date));
@@ -60,17 +71,27 @@ export async function render(app, ctx) {
 
     <div class="grid2" style="align-items:start">
       ${card('Purchase orders awaiting approval', pendPO.length, list(pendPO.map(po => `<tr><td><b>${esc(po.number)}</b> · ${esc(sup[po.supplier_id]?.name || '')}<div class="small muted">${esc(P[po.project_id].name)}</div></td><td class="n">${money(poValue(po) * (1 + Number(po.vat_rate ?? 0.15)), 0)}<div class="small muted">incl. VAT</div></td>
-        <td class="n"><a class="btn small" href="#/p/${po.project_id}/procure/po/${po.id}">Open</a>${isAdmin ? ` <button class="btn small primary" data-poa="${po.id}">Approve</button>` : ''}</td></tr>`), 'No purchase orders waiting.'))}
+        <td class="n"><a class="btn small" href="#/p/${po.project_id}/procure/po/${po.id}">Open</a>${approvalCheck(me, poValue(po) * (1 + Number(po.vat_rate ?? 0.15)), limits).ok ? ` <button class="btn small primary" data-poa="${po.id}">Approve</button>` : ''}</td></tr>`), 'No purchase orders waiting.'))}
       ${card('Requests from site', pendReq.length, list(pendReq.map(r => `<tr><td><b>${esc(r.description)}</b><div class="small muted">${esc(r.kind)} · ${esc(P[r.project_id].name)} · ${esc(r.requested_by || '')}${r.needed_by ? ' · needed ' + fmtDate(r.needed_by) : ''}</div></td>
-        <td class="n">${isAdmin ? `<button class="btn small primary" data-req="${r.id}" data-dec="approved">Approve</button> <button class="btn small" data-req="${r.id}" data-dec="declined">Decline</button>` : reqPill(r.status)}</td></tr>`), 'No pending requests.'))}
+        <td class="n">${(() => { const c = approvalCheck(me, r.est_value ?? reqValue(r), limits); return ['admin', 'ops', 'procurement'].includes(me?.role) ? (c.ok ? `<button class="btn small primary" data-req="${r.id}" data-dec="approved">Approve</button> ` : `<span class="small flag">Needs Matt</span> `) + `<button class="btn small" data-req="${r.id}" data-dec="declined">Decline</button>` : reqPill(r.status); })()}${r.est_value ? `<div class="small muted">${money(Number(r.est_value), 0)}</div>` : ''}</td></tr>`), 'No pending requests.'))}
+      ${toSupply.length || canStores(me) ? card('Approved – to supply', toSupply.length, list(toSupply.map(r => `<tr><td><b>${esc(r.description)}</b><div class="small muted">${esc(r.kind)} · ${esc(P[r.project_id].name)} · approved by ${esc(r.approved_by_name || '')}</div></td><td class="n">${canStores(me) ? `<button class="btn small primary" data-ful="${r.id}">Supply</button>` : reqPill(r.status)}</td></tr>`), 'Nothing waiting to be supplied.')) : ''}
+      ${card('Central Stores', awaitingSite.length + returnsIn.length + shortV.length + lowStock.length, list([
+        ...shortV.map(v => `<tr class="click" data-go="#/stores/vouchers"><td><b>${esc(v.number)}</b> received short<div class="small muted">${esc(Stores.locName(S, v.to_loc))}</div></td><td class="n"><span class="pill bad">Follow up</span></td></tr>`),
+        ...returnsIn.map(v => `<tr class="click" data-go="#/stores/vouchers"><td><b>${esc(v.number)}</b> return from ${esc(Stores.locName(S, v.from_loc))}</td><td class="n"><span class="pill warn">Receive</span></td></tr>`),
+        ...awaitingSite.map(v => `<tr class="click" data-go="#/stores/vouchers"><td><b>${esc(v.number)}</b> to ${esc(Stores.locName(S, v.to_loc))}<div class="small muted">issued ${fmtDate(v.voucher_date)}</div></td><td class="n"><span class="pill info">Awaiting site</span></td></tr>`),
+        ...lowStock.map(i => `<tr class="click" data-go="#/stores"><td><b>${esc(i.name)}</b> below minimum</td><td class="n small">${fmt(Stores.itemTotals(S, i).inStore)} / ${fmt(i.min_qty)}</td></tr>`)], 'Stores are up to date.'))}
+      ${card('Equipment: repairs & servicing', openEq.length + svcDue.length, list([
+        ...openEq.map(i => `<tr class="click" data-go="#/stores/care"><td><b>${esc(i.item_name)}</b>${i.tag_no ? ' ' + esc(i.tag_no) : ''} · ${esc(i.kind)}<div class="small muted">${esc((i.description || '').slice(0, 60))}</div></td><td class="n"><span class="pill ${i.status === 'open' ? 'bad' : 'warn'}">${i.status === 'open' ? 'Reported' : 'In repair'}</span></td></tr>`),
+        ...svcDue.map(x => `<tr class="click" data-go="#/stores/service"><td><b>${esc(x.a.tag_no)}</b> ${esc(S.itemBy[x.a.item_id]?.name || '')}<div class="small muted">${esc(x.d.text)}</div></td><td class="n"><span class="pill ${x.d.state === 'due' ? 'bad' : 'warn'}">${x.d.state === 'due' ? 'Service due' : 'Service soon'}</span></td></tr>`)], 'No damaged equipment or services due.'))}
+      ${openInc.length ? card('Safety incidents', openInc.length, list(openInc.map(i => `<tr class="click" data-go="#/p/${i.project_id}/site/safety"><td><b>${esc(i.kind)}</b> · ${esc(i.person || '')}<div class="small muted">${esc(P[i.project_id]?.name || '')} · ${fmtDate(i.inc_date)} · ${esc((i.description || '').slice(0, 60))}</div></td><td class="n small">${esc(i.severity || '')}</td></tr>`), '')) : ''}
       ${card('Overdue tasks', overdue.length, list(overdue.slice(0, 12).map(t => `<tr class="click" data-go="#/p/${t.project_id}/pow"><td><b>${esc(t.name)}</b><div class="small muted">${esc(P[t.project_id].name)}${staffBy[t.supervisor_id] ? ' · ' + esc(staffBy[t.supervisor_id].name) : ''}</div></td><td class="n"><span class="flag">due ${fmtDate(t.end_date)}</span><div class="small muted">${fmt(t.pct || 0)}% done</div></td></tr>`), 'Everything is on time.'))}
       ${card('Jobcards to review', toReview.length, list(toReview.map(j => `<tr class="click" data-go="#/p/${j.project_id}/site/jobcard/${j.card_date}${j.supervisor_id ? '?s=' + j.supervisor_id : ''}"><td><b>${esc(P[j.project_id].name)}</b><div class="small muted">${fmtDate(j.card_date)} · ${esc(staffBy[j.supervisor_id]?.name || '')}${j.issues ? ' · ⚠ issues reported' : ''}</div></td><td class="n">${(j.staff || []).reduce((t, s) => t + (Number(s.count) || 1), 0)} staff</td></tr>`), 'No jobcards waiting.'))}
       ${card('Site instructions in progress', openSI.length, list(openSI.map(s => `<tr class="click" data-go="#/p/${s.project_id}/site/si"><td><b>${esc(s.number)}</b> · ${esc(s.instructed_by || '')}<div class="small muted">${esc(P[s.project_id].name)} · ${esc((s.description || '').slice(0, 70))}</div></td><td class="n">${s.cost_impact ? money(Number(s.est_value) || 0, 0) : ''} ${siPill(s.status)}</td></tr>`), 'No open site instructions.'))}
       ${card('On site without a contract', noContract.length, list(noContract.map(x => `<tr class="click" data-go="#/people/contracts"><td><b>${esc(x.person.name)}</b><div class="small muted">${esc(x.person.role || '')} · ${esc(P[x.pid].name)}</div></td><td class="n"><span class="pill bad">No contract</span></td></tr>`), 'Everyone on site has a signed contract.'))}
       ${card('Certificates', ipcOpen.length + subToApprove.length + subToPay.length, list([
         ...ipcOpen.map(c => `<tr class="click" data-go="#/p/${c.project_id}/certs/ipc/${c.id}"><td><b>${esc(c.number)}</b> · client<div class="small muted">${esc(P[c.project_id].name)}</div></td><td class="n">${money(Number(c.claimed) || 0, 0)}<div class="small muted">${{ draft: 'draft – issue it', issued: 'issued – awaiting certification', certified: 'certified – awaiting payment' }[c.status]}</div></td></tr>`),
-        ...subToApprove.map(c => `<tr class="click" data-go="#/p/${c.project_id}/certs/subc/${c.id}"><td><b>${esc(c.number)}</b> · ${esc(staffBy[c.person_id]?.name || 'subcontractor')}<div class="small muted">${esc(P[c.project_id].name)}</div></td><td class="n">${money(Number(c.amount_due) || 0, 0)}<div class="small muted">to approve</div></td></tr>`),
-        ...subToPay.map(c => `<tr class="click" data-go="#/p/${c.project_id}/certs/subc/${c.id}"><td><b>${esc(c.number)}</b> · ${esc(staffBy[c.person_id]?.name || 'subcontractor')}<div class="small muted">${esc(P[c.project_id].name)}</div></td><td class="n">${money(Number(c.amount_due) || 0, 0)}<div class="small muted">approved – to pay</div></td></tr>`)], 'No certificates waiting.'))}
+        ...subToApprove.map(c => `<tr class="click" data-go="#/p/${c.project_id}/certs/${c.kind === 'hire' ? 'hirec' : 'subc'}/${c.id}"><td><b>${esc(c.number)}</b> · ${esc(c.kind === 'hire' ? (sup[c.supplier_id]?.name || 'plant hire') : staffBy[c.person_id]?.name || 'subcontractor')}<div class="small muted">${esc(P[c.project_id].name)}</div></td><td class="n">${money(Number(c.amount_due) || 0, 0)}<div class="small muted">to approve</div></td></tr>`),
+        ...subToPay.map(c => `<tr class="click" data-go="#/p/${c.project_id}/certs/${c.kind === 'hire' ? 'hirec' : 'subc'}/${c.id}"><td><b>${esc(c.number)}</b> · ${esc(c.kind === 'hire' ? (sup[c.supplier_id]?.name || 'plant hire') : staffBy[c.person_id]?.name || 'subcontractor')}<div class="small muted">${esc(P[c.project_id].name)}</div></td><td class="n">${money(Number(c.amount_due) || 0, 0)}<div class="small muted">approved – to pay</div></td></tr>`)], 'No certificates waiting.'))}
       ${card("Today's site diaries", 0, list(live.filter(p => tasks.some(t => t.project_id === p.id && activeOn(t, t0))).map(p => { const j = jobcards.find(x => x.project_id === p.id && x.card_date === t0); return `<tr class="click" data-go="#/p/${p.id}/site/jobcard/${t0}"><td><b>${esc(p.name)}</b></td><td class="n">${j ? (j.status === 'draft' ? '<span class="pill warn">In progress</span>' : '<span class="pill ok">Submitted</span>') : '<span class="pill mute">Not started</span>'}</td></tr>`; }), 'No work planned on site today.'))}
     </div>
 
@@ -88,5 +109,6 @@ export async function render(app, ctx) {
   app.querySelector('#np')?.addEventListener('click', () => ctx.newProject());
   app.querySelectorAll('[data-go]').forEach(r => r.onclick = () => ctx.go(r.dataset.go));
   app.querySelectorAll('[data-poa]').forEach(b => b.onclick = async () => { await poAct(store, pos.find(p => p.id === b.dataset.poa), 'approve', me); ctx.reload(); });
+  app.querySelectorAll('[data-ful]').forEach(b => b.onclick = () => fulfilRequest(ctx, reqs.find(r => r.id === b.dataset.ful)));
   app.querySelectorAll('[data-req]').forEach(b => b.onclick = () => decideRequest(ctx, reqs.find(r => r.id === b.dataset.req), b.dataset.dec));
 }

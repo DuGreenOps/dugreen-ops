@@ -3,7 +3,7 @@
 // site instructions, less retention and previous certificates. Every % and value can be amended before issuing.
 // Subcontractor certificates: work done (from jobcards and progress) × the agreed price, less retention
 // (normally 10% capped at 5% of the subcontract sum) and previous certificates, paid when Du Green is paid.
-import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, groupBy, canSetRates } from './util.js';
+import { esc, fmt, money, dialog, formData, toast, confirmDlg, num, today, fmtDate, addDays, groupBy, canSetRates, isManager } from './util.js';
 import { loadProcurement } from './procure.js';
 import { progress } from './pow.js';
 import { sortAreas } from './areas.js';
@@ -72,11 +72,13 @@ export async function render(root, ctx) {
   root.innerHTML = `<div class="page">
     <div class="row"><div class="grow"><div class="eyebrow">QS · Matt</div><h2 style="font-size:24px">Certificates</h2>
       <p class="small muted" style="margin:2px 0 0">Progress comes from the daily jobcards through the programme. Amend any line before you issue.</p></div>
-      <nav class="subtabs"><a href="#/p/${project.id}/certs" class="${sub === 'client' || sub === 'ipc' ? 'on' : ''}">Client certificates</a><a href="#/p/${project.id}/certs/sub" class="${sub === 'sub' || sub === 'subc' ? 'on' : ''}">Subcontractor certificates</a></nav></div>
+      <nav class="subtabs"><a href="#/p/${project.id}/certs" class="${sub === 'client' || sub === 'ipc' ? 'on' : ''}">Client certificates</a><a href="#/p/${project.id}/certs/sub" class="${sub === 'sub' || sub === 'subc' ? 'on' : ''}">Subcontractor certificates</a><a href="#/p/${project.id}/certs/hire" class="${sub === 'hire' || sub === 'hirec' ? 'on' : ''}">Plant hire</a></nav></div>
     <div id="cv"></div></div>`;
   const el = root.querySelector('#cv');
   if (sub === 'ipc') return ipcEditor(el, ctx, C, arg);
   if (sub === 'subc') return subEditor(el, ctx, C, arg);
+  if (sub === 'hire') return hireList(el, ctx, C);
+  if (sub === 'hirec') return hireEditor(el, ctx, C, arg);
   if (sub === 'sub') return subList(el, ctx, C);
   return ipcList(el, ctx, C);
 }
@@ -109,7 +111,7 @@ async function ipcEditor(el, ctx, C, id) {
   const prior = prevCerts[prevCerts.length - 1];
   const fresh = clientLines(C);
   const canEdit = !cert || ['draft'].includes(cert.status || 'draft');
-  const admin = ['admin', 'qs'].includes(me?.role);
+  const admin = isManager(me);
   let c;
   if (cert) c = JSON.parse(JSON.stringify(cert));
   else {
@@ -166,9 +168,9 @@ async function ipcEditor(el, ctx, C, id) {
   };
   const wire = () => {
     const q = s => el.querySelector(s);
-    el.querySelectorAll('[data-pct]').forEach(i => i.onchange = () => { readTop(); const l = c.lines[+i.dataset.pct]; l.pct = Math.min(100, Math.max(0, num(i.value) ?? 0)); delete l.value_override; l.edited = Math.abs(l.pct - l.pct_auto) > 0.05; draw(); });
-    el.querySelectorAll('[data-val]').forEach(i => i.onchange = () => { readTop(); const l = c.lines[+i.dataset.val]; const v = num(i.value); if (v == null) delete l.value_override; else { l.value_override = v; l.pct = l.value ? Math.round(v / l.value * 1000) / 10 : 0; } l.edited = true; draw(); });
-    el.querySelectorAll('[name=retention_pct],[name=retention_cap]').forEach(i => i.onchange = () => { readTop(); draw(); });
+    el.querySelectorAll('[data-pct]').forEach(i => i.onchange = () => { readTop(); const l = c.lines[+i.dataset.pct]; l.pct = Math.min(100, Math.max(0, num(i.value) ?? 0)); delete l.value_override; l.edited = Math.abs(l.pct - l.pct_auto) > 0.05; setTimeout(draw, 0); });
+    el.querySelectorAll('[data-val]').forEach(i => i.onchange = () => { readTop(); const l = c.lines[+i.dataset.val]; const v = num(i.value); if (v == null) delete l.value_override; else { l.value_override = v; l.pct = l.value ? Math.round(v / l.value * 1000) / 10 : 0; } l.edited = true; setTimeout(draw, 0); });
+    el.querySelectorAll('[name=retention_pct],[name=retention_cap]').forEach(i => i.onchange = () => { readTop(); setTimeout(draw, 0); });
     q('#print').onclick = () => { readTop(); openIpcDoc(project, c, ipcTotals(c, prevCerts), jcIn()); };
     q('#refresh') && (q('#refresh').onclick = () => {
       readTop(); const now = Object.fromEntries(clientLines(C).map(l => [l.key, l]));
@@ -212,6 +214,7 @@ export function openIpcDoc(project, c, T, jcs) {
 function subList(el, ctx, C) {
   const { project } = ctx;
   const subs = C.contracts.filter(c => c.type === 'subcontract' && c.status === 'signed');
+  C.subCerts = C.subCerts.filter(x => x.kind !== 'hire');
   el.innerHTML = `${subs.length ? '' : '<div class="note">No signed subcontracts on this project yet. Supervisors sign them on site from the jobcard, or from People → a subcontractor → New contract.</div>'}
     ${subs.map(sc => { const p = C.staffBy[sc.person_id]; const cs = C.subCerts.filter(x => x.contract_id === sc.id).sort((a, b) => String(a.cert_date).localeCompare(String(b.cert_date))); const last = cs[cs.length - 1];
       return `<section class="card"><div class="hd"><div class="grow"><h3>${esc(p?.name || sc.data?.company || 'Subcontractor')}</h3><div class="small muted">${esc(sc.number)} · ${esc(SUB_BASIS[sc.data?.basis] || '')} · sum ${money(Number(sc.data?.contract_sum) || 0, 0)} · retention ${fmt(sc.data?.retention_pct ?? 10)}% cap ${fmt(sc.data?.retention_cap ?? 5)}%${sc.data?.pay_when_paid === false ? '' : ' · pay-when-paid'}</div></div>
@@ -308,7 +311,7 @@ async function subEditor(el, ctx, C, id) {
   };
   const wire = () => {
     const q = s => el.querySelector(s);
-    el.querySelectorAll('[data-q],[data-e],[data-dd]').forEach(i => i.onchange = () => { readAll(); draw(); });
+    el.querySelectorAll('[data-q],[data-e],[data-dd]').forEach(i => i.onchange = () => { readAll(); setTimeout(draw, 0); });
     q('#print').onclick = () => { readAll(); openSubCertDoc(project, x, sc, person, subTotals(x, sc, mine)); };
     q('#refresh') && (q('#refresh').onclick = () => { readAll(); const fresh = subValuation(C, sc, x.period_to, prev); x.lines = fresh; draw(); toast('Quantities refreshed from the jobcards'); });
     q('#adde') && (q('#adde').onclick = () => { readAll(); x.extras.push({ description: '', amount: null }); draw(); });
@@ -338,4 +341,72 @@ export function openSubCertDoc(project, x, sc, person, T) {
   <div class="box"><b>Payment terms</b><div>${d.pay_when_paid === false ? `Payable within ${d.pay_days ?? 7} days of approval.` : `Pay-when-paid: payable within ${d.pay_days ?? 7} days after Du Green receives payment from the client for the work in this certificate.`} Paid only to the bank account on the subcontract agreement.</div></div>
   ${x.notes ? `<div class="box"><b>Notes</b><div style="white-space:pre-wrap">${esc(x.notes)}</div></div>` : ''}
   <div class="sig"><div>Approved for Du Green${x.approved_by_name ? ': ' + esc(x.approved_by_name) : ''}</div><div>Accepted by the Subcontractor</div></div>`, x.number);
+}
+
+// ------------------------------------------------------- plant hire certificates
+// Hours / days logged against a hire order on the daily jobcards × the agreed hire rate.
+const BASIS_L = { hour: 'hours', day: 'days', week: 'weeks', load: 'loads' };
+function hireLogged(C, po, to) {
+  const rows = [];
+  for (const j of C.jobcards.filter(j => j.status !== 'draft' && j.card_date <= to)) for (const h of j.hire || []) if (h.po_id === po.id && (Number(h.qty) || h.offhire)) rows.push({ date: j.card_date, qty: Number(h.qty) || 0, notes: h.notes || '', offhire: !!h.offhire });
+  return rows;
+}
+function hireList(el, ctx, C) {
+  const { project } = ctx;
+  const pos = C.D.pos.filter(p => p.hire);
+  const certs = C.subCerts.filter(x => x.kind === 'hire');
+  el.innerHTML = pos.length ? pos.map(po => { const cs = certs.filter(x => x.po_id === po.id).sort((a, b) => String(a.cert_date).localeCompare(String(b.cert_date))); const logged = hireLogged(C, po, '9999-12-31').reduce((t, r) => t + r.qty, 0);
+    return `<section class="card"><div class="hd"><div class="grow"><h3>${esc(po.hire_item || 'Plant hire')} · ${esc(C.D.sup[po.supplier_id]?.name || '')}</h3><div class="small muted">${esc(po.number)} · ${money(Number(po.hire_rate) || 0)} per ${esc(po.hire_basis || 'hour')} · ${esc(po.hire_terms || '')} · logged ${fmt(logged, 1)} ${esc(BASIS_L[po.hire_basis] || 'hours')}${po.hire_end ? ' · off-hired ' + fmtDate(po.hire_end) : ''}</div></div>
+      <a class="btn small primary" href="#/p/${project.id}/certs/hirec/new?po=${po.id}">+ Hire certificate</a></div>
+      ${cs.length ? `<div class="tbl"><table><thead><tr><th>Cert</th><th>Period to</th><th class="n">Qty to date</th><th class="n">Gross to date</th><th class="n">Due this cert</th><th>Status</th></tr></thead><tbody>${cs.map(x => `<tr class="click" data-h="${x.id}"><td><b>${esc(x.number)}</b></td><td>${fmtDate(x.period_to)}</td><td class="n">${fmt(x.lines?.[0]?.qty, 1)}</td><td class="n">${fmt(x.gross_to_date, 2)}</td><td class="n">${fmt(x.amount_due, 2)}</td><td>${subPill(x.status)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No hire certificates yet.</div>'}</section>`; }).join('')
+    : '<div class="note">No plant on hire for this project. Hire orders are created when Procurement supplies an approved “Plant hire” request from site.</div>';
+  el.querySelectorAll('[data-h]').forEach(r => r.onclick = () => ctx.go(`#/p/${project.id}/certs/hirec/${r.dataset.h}`));
+}
+async function hireEditor(el, ctx, C, id) {
+  const { store, project, me } = ctx;
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  let rec = id && id !== 'new' ? C.subCerts.find(x => x.id === id) : null;
+  const po = C.D.pos.find(p => p.id === (rec?.po_id || qs.get('po')));
+  if (!po) { el.innerHTML = '<div class="card empty">Hire order not found.</div>'; return; }
+  const prior = C.subCerts.filter(x => x.kind === 'hire' && x.po_id === po.id && x.id !== rec?.id && (!rec || String(x.cert_date) <= String(rec.cert_date))).sort((a, b) => String(a.cert_date).localeCompare(String(b.cert_date)));
+  const prev = prior[prior.length - 1];
+  const x = rec ? JSON.parse(JSON.stringify(rec)) : { number: `${po.number.replace('DG-PO-', 'HC')}-${String(prior.length + 1).padStart(2, '0')}`, cert_date: today(), period_from: prev?.period_to ? addDays(prev.period_to, 1) : (po.hire_start || po.po_date || today()), period_to: today(), status: 'draft', extras: [], deductions: [], retention_pct: 0 };
+  const fresh = () => { const rows = hireLogged(C, po, x.period_to); const q = rows.reduce((t, r) => t + r.qty, 0); return [{ key: 'hire', description: `${po.hire_item || 'Plant'} hire – ${BASIS_L[po.hire_basis] || 'hours'} logged on jobcards to ${fmtDate(x.period_to)}`, unit: po.hire_basis || 'hour', qty_auto: q, qty: q, rate: Number(po.hire_rate) || 0 }]; };
+  if (!rec) x.lines = fresh();
+  const canEdit = x.status === 'draft', approver = canSetRates(me);
+  const totals = () => { const gross = r2(x.lines.reduce((t, l) => t + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0) + (x.extras || []).reduce((t, e) => t + (Number(e.amount) || 0), 0)); const prevNet = r2(prior.reduce((t, p) => Math.max(t, Number(p.net_to_date) || 0), 0)); const less = r2((x.deductions || []).reduce((t, e) => t + (Number(e.amount) || 0), 0)); const net = r2(gross); return { gross, prev: prevNet, less, net, due: r2(net - prevNet - less), vat: r2((net - prevNet - less) * Number(po.vat_rate ?? 0.15)) }; };
+  const draw = () => {
+    const T = totals(), rows = hireLogged(C, po, x.period_to).filter(r => r.date >= x.period_from), dis = canEdit ? '' : 'disabled';
+    el.innerHTML = `<section class="card"><div class="hd"><div class="grow"><div class="small muted"><a href="#/p/${project.id}/certs/hire">Plant hire</a> /</div><h3>${esc(x.number)} · ${esc(C.D.sup[po.supplier_id]?.name || '')}</h3><div class="small muted">${esc(po.number)} · ${esc(po.hire_item || '')} · ${money(Number(po.hire_rate) || 0)} per ${esc(po.hire_basis || 'hour')}</div></div>${subPill(x.status)}
+        ${canEdit ? '<button class="btn" id="refresh">Refresh from jobcards</button>' : ''}<button class="btn" id="print">Print / PDF</button></div>
+      <div class="bd grid3"><label class="f">Certificate no.<input name="number" value="${esc(x.number)}" ${dis}></label><label class="f">Period from<input type="date" name="period_from" value="${esc(x.period_from)}" ${dis}></label><label class="f">Period to<input type="date" name="period_to" value="${esc(x.period_to)}" ${dis}></label></div></section>
+    <div class="kpis"><div class="kpi"><div class="k">Gross to date</div><div class="v">${money(T.gross, 0)}</div></div><div class="kpi"><div class="k">Previously certified</div><div class="v">${money(T.prev, 0)}</div></div><div class="kpi"><div class="k">Due excl. VAT</div><div class="v">${money(T.due, 2)}</div></div><div class="kpi"><div class="k">Incl. VAT</div><div class="v">${money(T.due + T.vat, 2)}</div></div></div>
+    <section class="card"><div class="hd"><h3>Hire to date</h3><span class="small muted">From the jobcards. Change the quantity to amend (e.g. standing time not payable).</span></div>
+      <div class="tbl"><table><thead><tr><th>Item</th><th class="n">From jobcards</th><th class="n">Qty to date</th><th class="n">Rate</th><th class="n">Value</th></tr></thead><tbody>${x.lines.map((l, i) => `<tr><td>${esc(l.description)}</td><td class="n small">${fmt(l.qty_auto, 1)}</td><td class="n"><input class="num" style="width:80px" data-q="${i}" inputmode="decimal" value="${l.qty ?? ''}" ${dis}>${Math.abs((l.qty || 0) - (l.qty_auto || 0)) > 0.005 ? ' ✎' : ''}</td><td class="n">${fmt(l.rate, 2)}</td><td class="n">${fmt((Number(l.qty) || 0) * (Number(l.rate) || 0), 2)}</td></tr>`).join('')}
+      ${(x.deductions || []).map((e, i) => `<tr><td><input data-dd="${i}" data-k="description" value="${esc(e.description)}" placeholder="Deduction (e.g. breakdown time, fuel supplied by Du Green)" ${dis}></td><td colspan="3"></td><td class="n"><input class="num" style="width:100px" data-dd="${i}" data-k="amount" inputmode="decimal" value="${e.amount ?? ''}" ${dis}></td></tr>`).join('')}</tbody></table></div>
+      ${canEdit ? '<div class="row" style="padding:10px 14px"><button class="btn small" id="addd">+ Deduction</button></div>' : ''}</section>
+    <section class="card"><div class="hd"><h3>Jobcard log this period</h3></div>${rows.length ? `<div class="tbl"><table><tbody>${rows.map(r => `<tr><td>${fmtDate(r.date)}</td><td class="n">${fmt(r.qty, 1)} ${esc(BASIS_L[po.hire_basis] || 'hours')}</td><td class="small">${esc(r.notes)}${r.offhire ? ' · <b>off-hired</b>' : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">Nothing logged in this period.</div>'}</section>
+    <section class="card"><div class="bd stack"><label class="f">Notes<textarea name="notes" ${dis}>${esc(x.notes || '')}</textarea></label>${x.status === 'approved' ? `<div class="grid2"><label class="f">Paid on<input type="date" name="paid_date" value="${esc(x.paid_date || '')}"></label><label class="f">Payment reference<input name="paid_ref" value="${esc(x.paid_ref || '')}"></label></div>` : ''}
+      <div class="row"><span class="grow"></span>${rec && canEdit ? '<button class="btn danger" id="del">Delete</button>' : ''}${canEdit ? `<button class="btn" id="save">Save draft</button>${approver ? '<button class="btn primary" id="approve">Approve</button>' : ''}` : ''}${x.status === 'approved' && approver ? '<button class="btn" id="unapprove">Back to draft</button><button class="btn primary" id="paid">Record payment</button>' : ''}</div></div></section>`;
+    wire();
+  };
+  const readAll = () => { const q = n => el.querySelector(`[name=${n}]`); if (canEdit) { x.number = q('number').value; x.period_from = q('period_from').value; x.period_to = q('period_to').value; x.notes = q('notes').value; el.querySelectorAll('[data-q]').forEach(i => { x.lines[+i.dataset.q].qty = num(i.value) ?? 0; }); el.querySelectorAll('[data-dd]').forEach(i => { x.deductions[+i.dataset.dd][i.dataset.k] = i.dataset.k === 'amount' ? num(i.value) : i.value; }); } if (q('paid_date')) { x.paid_date = q('paid_date').value || null; x.paid_ref = q('paid_ref').value || null; } };
+  const save = async (extra = {}) => { readAll(); Object.assign(x, extra); const T = totals(); const row = { kind: 'hire', project_id: project.id, po_id: po.id, supplier_id: po.supplier_id, contract_id: null, person_id: null, number: x.number, cert_date: x.cert_date, period_from: x.period_from, period_to: x.period_to, lines: x.lines, extras: [], deductions: x.deductions, gross_to_date: T.gross, retention_amt: 0, prev_certified: T.prev, net_to_date: T.net, amount_due: T.due, status: x.status, notes: x.notes || null, paid_date: x.paid_date || null, paid_ref: x.paid_ref || null, approved_at: x.approved_at || null, approved_by_name: x.approved_by_name || null }; rec = rec ? await store.update('sub_certs', rec.id, row) : await store.insert('sub_certs', row); return rec; };
+  const wire = () => {
+    const q = s => el.querySelector(s);
+    el.querySelectorAll('[data-q],[data-dd],[name=period_to]').forEach(i => i.onchange = () => { readAll(); setTimeout(draw, 0); });
+    q('#refresh') && (q('#refresh').onclick = () => { readAll(); x.lines = fresh(); draw(); toast('Refreshed from the jobcards'); });
+    q('#addd') && (q('#addd').onclick = () => { readAll(); x.deductions.push({ description: '', amount: null }); draw(); });
+    q('#print').onclick = () => { readAll(); const T = totals(); const rows = hireLogged(C, po, x.period_to).filter(r => r.date >= x.period_from); open(`${head('Plant Hire Certificate', `<div style="font-size:13px">${esc(project.name)}</div>`)}
+      <div class="meta"><div><b>Certificate:</b> ${esc(x.number)}<br><b>Period:</b> ${fmtDate(x.period_from)} – ${fmtDate(x.period_to)}<br><b>Hire order:</b> ${esc(po.number)}</div><div><b>Supplier:</b> ${esc(C.D.sup[po.supplier_id]?.name || '')}<br><b>Plant:</b> ${esc(po.hire_item || '')}<br><b>Rate:</b> ${money(Number(po.hire_rate) || 0)} per ${esc(po.hire_basis || 'hour')} (${esc(po.hire_terms || '')})</div></div>
+      <table><thead><tr><th>Date</th><th class="n">Qty</th><th>Site notes</th></tr></thead><tbody>${rows.map(r => `<tr><td>${fmtDate(r.date)}</td><td class="n">${fmt(r.qty, 1)}</td><td>${esc(r.notes)}${r.offhire ? ' (off-hired)' : ''}</td></tr>`).join('')}</tbody></table>
+      <table style="max-width:480px;margin:12px 0 0 auto"><tbody><tr><td>Quantity to date</td><td class="n">${fmt(x.lines[0]?.qty, 1)} ${esc(BASIS_L[po.hire_basis] || '')}</td></tr><tr><td>Gross to date</td><td class="n">${money(T.gross)}</td></tr><tr><td>Less previously certified</td><td class="n">(${money(T.prev)})</td></tr>${(x.deductions || []).filter(e => e.amount).map(e => `<tr><td>Less: ${esc(e.description || '')}</td><td class="n">(${money(e.amount)})</td></tr>`).join('')}<tr class="tot"><td>Due excl. VAT</td><td class="n">${money(T.due)}</td></tr><tr><td>VAT</td><td class="n">${money(T.vat)}</td></tr><tr class="tot"><td>Total</td><td class="n">${money(T.due + T.vat)}</td></tr></tbody></table>
+      <div class="sig"><div>Approved for Du Green${x.approved_by_name ? ': ' + esc(x.approved_by_name) : ''}</div><div>Supplier</div></div>`, x.number); };
+    q('#save') && (q('#save').onclick = async () => { await save(); toast('Saved'); ctx.go(`#/p/${project.id}/certs/hirec/${rec.id}`); });
+    q('#approve') && (q('#approve').onclick = async () => { await save({ status: 'approved', approved_at: new Date().toISOString(), approved_by_name: me?.full_name || null }); toast('Hire certificate approved'); ctx.go(`#/p/${project.id}/certs/hirec/${rec.id}`); });
+    q('#unapprove') && (q('#unapprove').onclick = async () => { await store.update('sub_certs', rec.id, { status: 'draft' }); ctx.reload(); });
+    q('#paid') && (q('#paid').onclick = async () => { readAll(); if (!x.paid_date) return toast('Enter the date it was paid'); await save({ status: 'paid' }); toast('Payment recorded'); ctx.reload(); });
+    q('#del') && (q('#del').onclick = async () => { if (await confirmDlg('Delete certificate?', x.number)) { await store.remove('sub_certs', rec.id); ctx.go(`#/p/${project.id}/certs/hire`); } });
+  };
+  draw();
 }

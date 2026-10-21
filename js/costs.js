@@ -30,8 +30,9 @@ export async function projectFinancials(store, project) {
   }
   for (const po of D.pos.filter(p => COMMITTED.includes(p.status))) {
     for (const l of D.poLines.filter(l => l.po_id === po.id)) {
-      const v = Number(l.qty) * Number(l.unit_price), k = catOf[l.item_key] || 'Other';
+      const v = Number(l.qty) * Number(l.unit_price), k = po.hire ? 'Plant hire & transport' : catOf[l.item_key] || 'Other';
       C(k).committed += v;
+      if (po.hire) continue; // hire is costed from approved hire certificates below
       if (po.status === 'received') C(k).received += v;
       else if (po.status === 'part') C(k).received += Math.min(Number(l.qty_received) || 0, Number(l.qty)) * Number(l.unit_price);
     }
@@ -50,7 +51,10 @@ export async function projectFinancials(store, project) {
   const subs = contracts.filter(c => c.type === 'subcontract' && c.status === 'signed');
   for (const c of subs) { const S = C('Subcontractors'); S.committed += Number(c.data?.contract_sum) || 0; S.budget += 0; }
   const lastCert = {};
-  for (const sc of subCerts.filter(x => ['approved', 'paid'].includes(x.status))) if (!lastCert[sc.contract_id] || String(sc.cert_date) >= String(lastCert[sc.contract_id].cert_date)) lastCert[sc.contract_id] = sc;
+  const lastHire = {};
+  for (const hc of subCerts.filter(x => x.kind === 'hire' && ['approved', 'paid'].includes(x.status))) if (!lastHire[hc.po_id] || String(hc.cert_date) >= String(lastHire[hc.po_id].cert_date)) lastHire[hc.po_id] = hc;
+  for (const hc of Object.values(lastHire)) C('Plant hire & transport').received += Number(hc.gross_to_date) || 0;
+  for (const sc of subCerts.filter(x => x.kind !== 'hire' && ['approved', 'paid'].includes(x.status))) if (!lastCert[sc.contract_id] || String(sc.cert_date) >= String(lastCert[sc.contract_id].cert_date)) lastCert[sc.contract_id] = sc;
   for (const sc of Object.values(lastCert)) C('Subcontractors').received += Number(sc.gross_to_date) || 0;
   const rows = Object.values(cats).map(r => ({ ...r, actual: r.received + r.labour + r.expenses, forecast: Math.max(r.budget, r.committed + r.labour + r.expenses) }))
     .sort((a, b) => (CATEGORIES.indexOf(a.cat) + 1 || 99) - (CATEGORIES.indexOf(b.cat) + 1 || 99));
@@ -116,7 +120,7 @@ export async function render(root, ctx) {
     <div class="grid2" style="align-items:start">
       <section class="card"><div class="hd"><h3>Certificates</h3><span class="grow"></span><a class="btn small primary" href="#/p/${project.id}/certs">Open certificates</a></div>
         <div class="bd small stack" style="gap:4px"><div>Client: certified <b>${money(F.certified, 0)}</b> · paid <b>${money(F.paid, 0)}</b> · outstanding <b style="color:${F.certified - F.paid > 0 ? 'var(--warn)' : 'inherit'}">${money(F.certified - F.paid, 0)}</b></div>
-          <div>Subcontractors: approved, not yet paid <b>${money(F.subDue, 0)}</b> · paid <b>${money(F.subPaid, 0)}</b></div>
+          <div>Subcontractors &amp; plant hire: approved, not yet paid <b>${money(F.subDue, 0)}</b> · paid <b>${money(F.subPaid, 0)}</b></div>
           <div class="muted">Certificates are valued from the jobcards and the programme. Matt or the QS can amend them before issuing.</div></div></section>
       <section class="card"><div class="hd"><h3>Other expenses</h3><span class="small muted">fuel, hire, petty cash, transport</span><span class="grow"></span><button class="btn small primary" id="adde">+ Expense</button></div>
         ${F.expenses.length ? `<div class="tbl"><table><thead><tr><th>Date</th><th>Item</th><th>Category</th><th class="n">Amount</th></tr></thead><tbody>${[...F.expenses].reverse().map(e => `<tr class="click" data-e="${e.id}"><td>${fmtDate(e.exp_date)}</td><td>${esc(e.description || '')}<div class="small muted">${esc(e.supplier || '')}</div></td><td class="small">${esc(e.category || '')}</td><td class="n">${fmt(e.amount, 2)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No expenses recorded.</div>'}</section>
